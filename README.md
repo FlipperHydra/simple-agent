@@ -4,8 +4,8 @@ The logic behind executing these files is quite simple:
 
 A regex handles XML like output that is different for each tool, for example:
 <write_tool>
-  <arg1>
+  <argN>
     content
-  </arg2>
+  </argN>
 </write_tool>
 

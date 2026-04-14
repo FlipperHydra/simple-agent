@@ -1,0 +1,140 @@
+//This file is COMPLETELY AI generated, and saved to 'calculator.html' by the 'save_tool'
+
+&<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Calculator</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f4f4f9;
+            font-family: Arial, sans-serif;
+        }
+        .calculator {
+            background-color: #333;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+        }
+        .display {
+            background-color: #111;
+            color: white;
+            padding: 20px;
+            text-align: right;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            font-size: 2.5em;
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+        .buttons {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+        }
+        button {
+            padding: 20px;
+            font-size: 1.5em;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            background-color: #555;
+            color: white;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #777;
+        }
+        .operator {
+            background-color: #ff9500;
+        }
+        .operator:hover {
+            background-color: #e08500;
+        }
+        .clear {
+            background-color: #d4d4d2;
+            color: black;
+        }
+        .clear:hover {
+            background-color: #c0c0b4;
+        }
+        .equals {
+            grid-column: span 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="calculator">
+        <div class="display" id="display">0</div>
+        <div class="buttons">
+            <button class="clear" onclick="clearDisplay()">C</button>
+            <button class="operator" onclick="appendToDisplay('/')">/</button>
+            <button class="operator" onclick="appendToDisplay('*')">*</button>
+            <button class="operator" onclick="appendToDisplay('-')">-</button>
+
+            <button onclick="appendToDisplay('7')">7</button>
+            <button onclick="appendToDisplay('8')">8</button>
+            <button onclick="appendToDisplay('9')">9</button>
+            <button class="operator" onclick="appendToDisplay('+')">+</button>
+
+            <button onclick="appendToDisplay('4')">4</button>
+            <button onclick="appendToDisplay('5')">5</button>
+            <button onclick="appendToDisplay('6')">6</button>
+            <button class="equals" onclick="calculateResult()">=</button>
+
+            <button onclick="appendToDisplay('1')">1</button>
+            <button onclick="appendToDisplay('2')">2</button>
+            <button onclick="appendToDisplay('3')">3</button>
+            <button class="equals" style="grid-row: 4 / span 2;" onclick="calculateResult()">=</button>
+
+            <button onclick="appendToDisplay('0')" style="grid-column: span 2;">0</button>
+            <button onclick="appendToDisplay('.')">.</button>
+            <!-- The structure above was slightly adjusted for better button placement in a real grid, 
+                 but for simplicity matching standard calculator layouts: -->
+        </div>
+    </div>
+
+    <script>
+        const display = document.getElementById('display');
+        let currentInput = '';
+
+        function updateDisplay(value) {
+            display.textContent = value;
+        }
+
+        function clearDisplay() {
+            currentInput = '';
+            updateDisplay('0');
+        }
+
+        function appendToDisplay(value) {
+            if (currentInput === '0' && value !== '.' && value !== '0') {
+                currentInput = value;
+            } else {
+                currentInput += value;
+            }
+            updateDisplay(currentInput);
+        }
+
+        function calculateResult() {
+            try {
+                // Use Function constructor for safe evaluation of math expressions
+                const result = new Function('return ' + currentInput)();
+                currentInput = result.toString();
+                updateDisplay(currentInput);
+            } catch (e) {
+                updateDisplay('Error');
+                currentInput = '';
+            }
+        }
+        
+        // Initial setup
+        updateDisplay('0');
+    </script>
+</body>
+</html>

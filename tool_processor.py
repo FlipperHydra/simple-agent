@@ -1,5 +1,5 @@
 import re
-from typing import Any, List
+from typing import Any, Dict, List
 
 from tool_registry import ToolRegistry
 
@@ -28,6 +28,7 @@ class ToolProcessor:
         self._registry = registry
         self._buffer: str = ""
         self._pattern: re.Pattern = self._build_pattern()
+        self._results: List[Dict[str, str]] = []
 
     # pulls the chat into buffer to be analyzed for tool calls.
 
@@ -49,6 +50,15 @@ class ToolProcessor:
                 self._buffer += f"\n{close_tag}"
         self._flush_complete_blocks()
         self._buffer = ""
+
+    def flush_results(self) -> List[Dict[str, str]]:
+        """
+        Returns all tool results captured since the last flush, then clears
+        the internal list. Each entry is {"tool": name, "result": str}.
+        """
+        results = list(self._results)
+        self._results.clear()
+        return results
 
     def rebuild_pattern(self) -> None:
         """Call this if you register new tools after __init__."""
@@ -92,7 +102,7 @@ class ToolProcessor:
         as a single-element list — this keeps bare single-argument calls
         working as a fallback.
         """
-        matches = self._ARG_PATTERN.findall(inner)  # → [("1", "val1"), ("2", "val2"), ...]
+        matches = self._ARG_PATTERN.findall(inner)  # -> [("1", "val1"), ("2", "val2"), ...]
 
         if not matches:
             # Fallback: treat the whole inner block as one argument
@@ -134,6 +144,11 @@ class ToolProcessor:
 
         func = self._registry.get(tool_name)
         try:
-            func(*args)
+            result = func(*args)
+            if result is not None:
+                self._results.append({
+                    "tool": tool_name,
+                    "result": str(result)
+                })
         except TypeError as e:
             print(f"[ToolProcessor] Argument mismatch for {tool_name!r}: {e}")

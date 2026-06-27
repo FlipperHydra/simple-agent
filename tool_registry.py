@@ -1,17 +1,50 @@
+from __future__ import annotations
 from typing import Any, Callable, Dict, List, NamedTuple
 from tools import Tools
 
 
-# Tool metadata
-
-
 class ToolMeta(NamedTuple):
     func: Callable[..., Any]
-    arg_names: List[str]   # ordered list of argument labels shown in the prompt
-    description: str       # one-line description shown in the prompt
+    arg_names: List[str]
+    description: str
 
 
-# Tool Registry
+def _make_write_tool() -> Callable:
+    async def write_tool(text: str) -> str:
+        Tools.write_tool(text)
+        return f'written: {text[:60]}'
+    return write_tool
+
+
+def _make_save_tool() -> Callable:
+    async def save_tool(filename: str, content: str) -> str:
+        Tools.save_tool(filename, content)
+        return f'saved to {filename}'
+    return save_tool
+
+
+def _make_read_file() -> Callable:
+    async def read_file(filename: str) -> str:
+        return Tools.read_file(filename)
+    return read_file
+
+
+def _make_list_files() -> Callable:
+    async def list_files(directory: str = '.') -> str:
+        return Tools.list_files(directory)
+    return list_files
+
+
+def _make_fetch_url() -> Callable:
+    async def fetch_url(url: str) -> str:
+        return Tools.fetch_url(url)
+    return fetch_url
+
+
+def _make_search_web() -> Callable:
+    async def search_web(query: str) -> str:
+        return Tools.search_web(query)
+    return search_web
 
 
 class ToolRegistry:
@@ -19,56 +52,48 @@ class ToolRegistry:
         self._tools: Dict[str, ToolMeta] = {}
         self._register_defaults()
 
-    # MODIFY THIS TO ADD TOOLS
     def _register_defaults(self) -> None:
         self.register_tool(
-            "write_tool",
-            Tools.write_tool,
-            arg_names=["text"],
-            description="writes the given text to output.txt",
+            'write_tool',
+            _make_write_tool(),
+            arg_names=['text'],
+            description='appends text to output.txt in the current directory',
         )
         self.register_tool(
-            "save_tool",
-            Tools.save_tool,
-            arg_names=["filename", "content"],
-            description="saves content to a named file",
+            'save_tool',
+            _make_save_tool(),
+            arg_names=['filename', 'content'],
+            description='appends content to a named file',
         )
         self.register_tool(
-            "read_file",
-            Tools.read_file,
-            arg_names=["filename"],
-            description="reads and returns the contents of a file",
+            'read_file',
+            _make_read_file(),
+            arg_names=['filename'],
+            description='reads and returns the full contents of a file',
         )
         self.register_tool(
-            "list_files",
-            Tools.list_files,
-            arg_names=["directory"],
-            description="lists all files in a directory",
+            'list_files',
+            _make_list_files(),
+            arg_names=['directory'],
+            description='lists all entries in a directory, defaults to current directory',
         )
         self.register_tool(
-            "fetch_url",
-            Tools.fetch_url,
-            arg_names=["url"],
-            description="fetches and returns the text content of a URL (max 4000 chars)",
+            'fetch_url',
+            _make_fetch_url(),
+            arg_names=['url'],
+            description='fetches and returns the first 4000 characters of a URL',
         )
         self.register_tool(
-            "search_web",
-            Tools.search_web,
-            arg_names=["query"],
-            description="searches DuckDuckGo and returns a summary of results",
+            'search_web',
+            _make_search_web(),
+            arg_names=['query'],
+            description='searches the web via DuckDuckGo and returns top 5 results',
         )
 
-    def register_tool(
-        self,
-        name: str,
-        func: Callable[..., Any],
-        *,
-        arg_names: List[str] | None = None,
-        description: str = "",
-    ) -> None:
+    def register_tool(self, name, func, *, arg_names=None, description='') -> None:
         self._tools[name] = ToolMeta(
             func=func,
-            arg_names=arg_names or ["arg"],
+            arg_names=arg_names or ['arg'],
             description=description,
         )
 
@@ -86,26 +111,15 @@ class ToolRegistry:
         return list(self._tools.keys())
 
     def tag_descriptions(self) -> List[str]:
-        """
-        Returns one description block per registered tool showing every
-        argument in nested-tag format, e.g.:
-
-          write_tool — writes the given text to a file
-            <write_tool>
-              <arg1>text</arg1>
-            </write_tool>
-
-        Used by build_tool_prompt() to auto-generate the system prompt.
-        """
         blocks = []
         for name, meta in self._tools.items():
-            inner = "\n".join(
-                f"  <arg{i+1}>{label}</arg{i+1}>"
+            inner = '\n'.join(
+                f'  <arg{i+1}>{label}</arg{i+1}>'
                 for i, label in enumerate(meta.arg_names)
             )
             blocks.append(
-                f"  {name} \u2014 {meta.description}\n"
-                f"  <{name}>\n{inner}\n  </{name}>"
+                f'  {name} -- {meta.description}\n'
+                f'  <{name}>\n{inner}\n  </{name}>'
             )
         return blocks
 

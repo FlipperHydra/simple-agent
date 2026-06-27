@@ -1,23 +1,64 @@
-from ollama import chat
+from __future__ import annotations
+import asyncio
+import ollama
 from tool_registry import ToolRegistry
 from tool_processor import ToolProcessor
-from prompts import build_tool_prompt, FORMAT_PROMPT, REASONING_PROMPT
+from agent_context import (
+    AgentContext,
+    TIER_MODEL_MAP,
+    TIER_DESCRIPTIONS,
+    REQUIRES_CONFIRMATION,
+)
+from prompts import orchestrator_prompt, FORMAT_PROMPT, REASONING_PROMPT
+
+_client = ollama.AsyncClient()
 
 
-def main() -> None:
+def _build_confirmed_models() -> set[str]:
+    confirmed: set[str] = set()
 
-    registry = ToolRegistry()
-    tp = ToolProcessor(registry)
+    for tier, needs_confirm in REQUIRES_CONFIRMATION.items():
+        if not needs_confirm:
+            continue
 
-    # Build the tool prompt dynamically — picks up every registered tool
-    tool_prompt = build_tool_prompt(registry)
+        model_name = TIER_MODEL_MAP[tier]
+        description = TIER_DESCRIPTIONS[tier]
 
-    # System prompts stay fixed across all turns
-    messages = [
-        {'role': 'system', 'content': tool_prompt},
-        {'role': 'system', 'content': FORMAT_PROMPT},
-        {'role': 'system', 'content': REASONING_PROMPT},
+        warning = (
+            f"\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n"
+            f"\u2502  \u26a0  Confirmation required: {tier.value.upper()} tier ({model_name})\n"
+            f"\u2502\n"
+            f"\u2502  {description}\n"
+            f"\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n"
+            f"Allow sub-agents to use {model_name}? (y/n): "
+        )
+
+        if input(warning).strip().lower() == "y":
+            confirmed.add(model_name)
+            print(f"[main] {model_name} approved for sub-agents.\n")
+        else:
+            print(f"[main] {model_name} restricted to orchestrator only.\n")
+
+    return confirmed
+
+
+async def main() -> None:
+    confirmed_models = _build_confirmed_models()
+
+    orchestrator_context = AgentContext(
+        restrictions="",
+        confirmed_models=confirmed_models,
+    )
+
+    registry = ToolRegistry(context=orchestrator_context)
+
+    system_messages = [
+        {"role": "system", "content": orchestrator_prompt(registry)},
+        {"role": "system", "content": FORMAT_PROMPT},
+        {"role": "system", "content": REASONING_PROMPT},
     ]
+
+    messages = list(system_messages)
 
     print("Agent ready. Type /clear to reset history, /quit to exit.")
 
@@ -28,19 +69,21 @@ def main() -> None:
             break
 
         if user_message == "/clear":
-            messages = messages[:3]  # keep only the 3 system prompts
+            messages = list(system_messages)
+            orchestrator_context.orchestrator_brief = ""
             print("[History cleared]")
             continue
 
         if not user_message:
             continue
 
-        messages.append({'role': 'user', 'content': user_message})
+        orchestrator_context.orchestrator_brief = user_message
+        messages.append({"role": "user", "content": user_message})
 
-        # The 'model' aspect of the system.
-        # Change model and content as required.
-        response = chat(
-            model='gemma4',
+        tp = ToolProcessor(registry)
+
+        response = await _client.chat(
+            model="gemma4",
             messages=messages,
             think=True,
             stream=True,
@@ -49,40 +92,36 @@ def main() -> None:
         full_response = ""
         in_thinking = False
 
-        # Thinking stream and content stream are interleaved, so we check each chunk for both.
-        for chunk in response:
+        async for chunk in response:
             if chunk.message.thinking:
                 if not in_thinking:
                     print("\n\u2500\u2500 Thinking \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n")
                     in_thinking = True
-                print(chunk.message.thinking, end='', flush=True)
+                print(chunk.message.thinking, end="", flush=True)
 
             elif chunk.message.content:
                 if in_thinking:
                     print("\n\n\u2500\u2500 Final Answer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n")
                     in_thinking = False
-                print(chunk.message.content, end='', flush=True)
+                print(chunk.message.content, end="", flush=True)
                 full_response += chunk.message.content
                 tp.feed(chunk)
 
-        tp.finalize()
+        await tp.finalize()
         print()
 
-        # Append the assistant's full response to history
-        messages.append({'role': 'assistant', 'content': full_response})
+        messages.append({"role": "assistant", "content": full_response})
 
-        # Inject any tool results back into the conversation so the model can act on them
         tool_results = tp.flush_results()
         for tr in tool_results:
             messages.append({
-                'role': 'user',
-                'content': f"[Tool result: {tr['tool']}]\n{tr['result']}"
+                "role": "user",
+                "content": f"[Tool result: {tr['tool']}]\n{tr['result']}"
             })
 
         if tool_results:
-            # Let the model reason about the tool results it just received
-            followup = chat(
-                model='gemma4',
+            followup = await _client.chat(
+                model="gemma4",
                 messages=messages,
                 think=True,
                 stream=True,
@@ -90,27 +129,29 @@ def main() -> None:
 
             followup_response = ""
             in_thinking = False
+            tp2 = ToolProcessor(registry)
 
-            for chunk in followup:
+            async for chunk in followup:
                 if chunk.message.thinking:
                     if not in_thinking:
                         print("\n\u2500\u2500 Thinking \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n")
                         in_thinking = True
-                    print(chunk.message.thinking, end='', flush=True)
+                    print(chunk.message.thinking, end="", flush=True)
 
                 elif chunk.message.content:
                     if in_thinking:
                         print("\n\n\u2500\u2500 Final Answer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n")
                         in_thinking = False
-                    print(chunk.message.content, end='', flush=True)
+                    print(chunk.message.content, end="", flush=True)
                     followup_response += chunk.message.content
-                    tp.feed(chunk)
+                    tp2.feed(chunk)
 
-            tp.finalize()
+            await tp2.finalize()
             print()
+            messages.append({"role": "assistant", "content": followup_response})
 
-            messages.append({'role': 'assistant', 'content': followup_response})
+    print(f"\n[Session complete — {orchestrator_context._spawned_count} sub-agent(s) spawned]")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

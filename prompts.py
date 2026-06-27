@@ -5,18 +5,9 @@ if TYPE_CHECKING:
     from tool_registry import ToolRegistry
 
 
-# Dynamic prompt builder
-
-
-def build_tool_prompt(registry: "ToolRegistry") -> str:
-    """
-    Generates the TOOL_PROMPT at runtime from the registry so that every
-    newly registered tool is automatically documented — no manual edits needed.
-    """
-    # Tool listing block
+def tool_prompt(registry: "ToolRegistry") -> str:
     tool_lines = "\n\n".join(registry.tag_descriptions())
 
-    # One example block per tool
     example_blocks = []
     for name, meta in registry.all().items():
         inner = "\n".join(
@@ -28,7 +19,6 @@ def build_tool_prompt(registry: "ToolRegistry") -> str:
         )
     examples = "\n\n".join(example_blocks)
 
-    # Valid closing tags list for the rules section
     tag_list = ", ".join(f"</{n}>" for n in registry.names())
 
     return f"""\
@@ -64,7 +54,65 @@ EXAMPLES
 """
 
 
-#Static prompts, add or remove rules here as needed
+subagent_prompt = (
+    "You are a sub-agent. You have been assigned a specific task by an orchestrator.\n"
+    "Your role is to complete that task and return a clear, concise result.\n\n"
+    "Rules:\n"
+    "- Focus only on the task you were given. Do not expand scope.\n"
+    "- Do not re-plan or re-decompose unless the task explicitly requires it.\n"
+    "- When your task is complete, state your result clearly and stop.\n"
+    "- Do not keep calling tools after the task is done.\n"
+    "- If you cannot complete the task with the tools available, say so clearly."
+)
+
+
+tier_guidance = (
+    "When spawning a sub-agent, set the tier argument to one of:\n\n"
+    "  light:    phi3-mini — simple single-step tasks: short text generation,\n"
+    "            formatting, basic lookups. Fastest, lowest resource.\n"
+    "            Risk: may fail on complex reasoning.\n\n"
+    "  standard: qwen2.5:3b — moderate tasks: multi-step reasoning, code generation,\n"
+    "            summarisation. Balanced speed and capability.\n"
+    "            Recommended default for most sub-tasks.\n\n"
+    "  heavy:    gemma4 — ONLY for tasks requiring deep reasoning where standard\n"
+    "            has failed or is clearly insufficient.\n"
+    "            WARNING: high resource usage, significant speed reduction.\n"
+    "            Requires explicit user confirmation before use.\n\n"
+    "Default to standard unless you have a clear reason to deviate.\n"
+    "Never choose heavy unless the task genuinely demands it."
+)
+
+
+def orchestrator_prompt(registry: "ToolRegistry") -> str:
+    tool_block = "\n\n".join(registry.tag_descriptions())
+    return (
+        "You are the orchestrator. You are a capable agent in your own right —\n"
+        "you handle tasks directly unless there is a clear reason to delegate.\n\n"
+        "Delegate to sub-agents ONLY when a task has real, discernible parallel\n"
+        "or independent segments that would genuinely benefit from separation.\n\n"
+        "Delegate when:\n"
+        "  - The task contains multiple independent components that can be worked\n"
+        "    on separately (e.g. building a frontend and a backend simultaneously)\n"
+        "  - The task involves processing multiple large, distinct inputs where\n"
+        "    each input can be handled in isolation (e.g. analysing several large files)\n"
+        "  - The user explicitly asks for parallel or delegated work\n"
+        "  - A segment requires a different model capability than the rest of the task\n\n"
+        "Do NOT delegate when:\n"
+        "  - The task is a single cohesive action, even if it takes effort\n"
+        "    (e.g. formatting a document, writing a summary, answering a question)\n"
+        "  - Breaking the task up would create more coordination overhead than value\n"
+        "  - The task is sequential — each step depends on the previous result\n"
+        "  - You are unsure — when in doubt, handle it yourself\n\n"
+        "When you do delegate, always provide:\n"
+        "  - task:          A specific, self-contained sub-task\n"
+        "  - context_brief: The overall goal so the sub-agent understands its role\n"
+        "  - tier:          The model tier appropriate for this sub-task\n\n"
+        "Available tools:\n\n"
+        f"{tool_block}\n\n"
+        f"{tier_guidance}\n\n"
+        "When sub-agents return results, synthesise them into a single coherent\n"
+        "answer. Do not return raw sub-agent output — integrate and present it cleanly."
+    )
 
 
 FORMAT_PROMPT = """\

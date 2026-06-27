@@ -5,31 +5,21 @@ if TYPE_CHECKING:
     from tool_registry import ToolRegistry
 
 
-# Dynamic prompt builder
+def tool_prompt(registry: 'ToolRegistry') -> str:
+    tool_lines = '\n\n'.join(registry.tag_descriptions())
 
-
-def build_tool_prompt(registry: "ToolRegistry") -> str:
-    """
-    Generates the TOOL_PROMPT at runtime from the registry so that every
-    newly registered tool is automatically documented — no manual edits needed.
-    """
-    # Tool listing block
-    tool_lines = "\n\n".join(registry.tag_descriptions())
-
-    # One example block per tool
     example_blocks = []
     for name, meta in registry.all().items():
-        inner = "\n".join(
-            f"<arg{i+1}>\nexample {label} here\n</arg{i+1}>"
+        inner = '\n'.join(
+            f'<arg{i+1}>\nexample {label} here\n</arg{i+1}>'
             for i, label in enumerate(meta.arg_names)
         )
         example_blocks.append(
-            f"<{name}>\n{inner}\n</{name}>"
+            f'<{name}>\n{inner}\n</{name}>'
         )
-    examples = "\n\n".join(example_blocks)
+    examples = '\n\n'.join(example_blocks)
 
-    # Valid closing tags list for the rules section
-    tag_list = ", ".join(f"</{n}>" for n in registry.names())
+    tag_list = ', '.join(f'</{n}>' for n in registry.names())
 
     return f"""\
 You are a helpful assistant. You have access to the following tools:
@@ -37,7 +27,7 @@ You are a helpful assistant. You have access to the following tools:
 {tool_lines}
 
 TOOL USAGE FORMAT
-─────────────────
+-----------------
 When you want to invoke a tool, wrap your arguments in nested tags inside
 the tool's own tags:
 
@@ -52,24 +42,21 @@ Rules:
 3. The argument value goes between its open and close tag.
 4. Every <argN> tag must have a matching </argN> close tag.
 5. The closing tool tag must be on its own line after all argument tags.
-6. No extra text between the outer tool tags — only <argN> blocks.
+6. No extra text between the outer tool tags -- only <argN> blocks.
 7. You may call a tool multiple times by repeating the entire block.
 8. Write your normal conversational reply outside the tool tags.
 9. Valid closing tool tags are: {tag_list}
 10. Always include all required arguments for a tool, in order starting from <arg1>.
 
 EXAMPLES
-────────
+--------
 {examples}
 """
 
 
-#Static prompts, add or remove rules here as needed
-
-
 FORMAT_PROMPT = """\
-CHARACTER RULES — APPLY TO ALL OUTPUT
-────────────────────────────────────────────────────────
+CHARACTER RULES -- APPLY TO ALL OUTPUT
+----------------------------------------
 These rules govern every character you emit: conversational replies,
 tool arguments, and any other output.
 
@@ -82,14 +69,14 @@ FORBIDDEN CHARACTERS
   - Any non-ASCII character (accented letters, symbols, emojis, etc.)
   - Parentheses outside of tool arguments
   - < and > outside of the tool tags and argument tags
-  - Dashes, bullets, or newlines as list separators — use letter prefixes instead:
+  - Dashes, bullets, or newlines as list separators -- use letter prefixes instead:
       A. first item, B. second item, C. third item
 
-────────────────────────────────────────────────────────
+----------------------------------------
 RULES SPECIFIC TO TOOL ARGUMENTS
-────────────────────────────────────────────────────────
+----------------------------------------
   - Use ASCII only. Replace accented characters with their plain ASCII equivalent.
-  - Use \\n for line breaks — never insert a literal newline inside an argument.
+  - Use \\n for line breaks -- never insert a literal newline inside an argument.
   - Never place double-quote characters inside an argument.
   - Use single-quotes for any quotation within the text.
 """
@@ -97,7 +84,7 @@ RULES SPECIFIC TO TOOL ARGUMENTS
 
 REASONING_PROMPT = """\
 BEFORE PRODUCING YOUR RESPONSE
-────────────────────────────────────────
+----------------------------------------
 1. PLAN YOUR TOOL USAGE
    Think through whether a tool call is needed for this response.
    If yes, identify: A. which tool to call, B. how many arguments it needs,

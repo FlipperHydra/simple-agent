@@ -313,3 +313,6 @@ BEFORE PRODUCING YOUR RESPONSE
    If any check fails, correct the response before outputting it.
    Do not output a response that violates any instruction.
 """
+
+
+from research_prompt import RESEARCH_PROMPT

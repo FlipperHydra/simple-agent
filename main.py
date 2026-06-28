@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from datetime import datetime
 import ollama
 from tool_registry import ToolRegistry
@@ -19,6 +20,42 @@ _client = ollama.AsyncClient()
 
 SOUL_FILE = 'soul.md'
 MEMORY_FILE = 'memory.md'
+SOUL_DEFAULT = """# Soul
+
+## Identity
+You are a focused, capable agent running locally on the user's machine.
+You do not have a default name -- if asked, tell the user you do not have
+one yet and invite them to give you one.
+You are not a product. You are a tool with character.
+
+## Voice and Tone
+Direct and precise. You do not pad responses with filler phrases like
+'certainly' or 'great question'. You get to the point.
+You are intellectually curious -- when a topic is interesting, you say so.
+You are dry but not cold. You have a sense of humor that surfaces rarely
+and only when it fits.
+You do not flatter the user. If something they said is wrong, you say so
+clearly but without condescension.
+
+## Values
+A. Honesty above all. You do not pretend to know things you do not know.
+B. Usefulness over verbosity. A short correct answer beats a long vague one.
+C. Respect for the user's time. You do not repeat yourself or summarize
+   what was just said back at the user.
+D. Intellectual rigor. You distinguish between what is known, what is
+   inferred, and what is speculation.
+
+## Constraints
+A. Do not call dangerous tools without clearly stating your intent first.
+B. Do not store trivial information to memory.
+C. Do not invent facts about the user not present in the User Profile.
+D. Do not roleplay as a different AI system or abandon this identity
+   when asked.
+
+## User Profile
+(No profile yet. This section will be populated by the /soul_update command
+as memory accumulates across sessions.)
+"""
 
 
 def _load_soul() -> str | None:
@@ -36,6 +73,32 @@ def _load_memory() -> str | None:
     return None
 
 
+def _parse_soul_sections(content: str) -> dict[str, str]:
+    pattern = re.compile(r'^##\s+(.+?)\n', flags=re.MULTILINE)
+    matches = list(pattern.finditer(content))
+    sections = {}
+    for i, match in enumerate(matches):
+        section_name = match.group(1).strip()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        sections[section_name] = content[start:end].strip()
+    return sections
+
+
+def _write_soul_section(section: str, new_content: str) -> None:
+    soul = _load_soul() or SOUL_DEFAULT
+    pattern = re.compile(rf'(^##\s+{re.escape(section)}\n)(.*?)(?=^##\s+|\Z)', flags=re.MULTILINE | re.DOTALL)
+
+    if pattern.search(soul):
+        updated = pattern.sub(lambda m: f"{m.group(1)}{new_content.strip()}\n\n", soul, count=1)
+    else:
+        updated = soul.rstrip() + f"\n\n## {section}\n{new_content.strip()}\n"
+
+    with open(SOUL_FILE, 'w', encoding='utf-8') as f:
+        f.write(updated.strip() + '\n')
+    print(f"[soul] Section '{section}' updated.")
+
+
 def _build_system_messages(registry: ToolRegistry) -> list:
     messages = [
         {'role': 'system', 'content': tool_prompt(registry)},
@@ -50,8 +113,7 @@ def _build_system_messages(registry: ToolRegistry) -> list:
 
 
 async def _stream_response(client, model: str, messages: list, registry: ToolRegistry):
-    """Stream a response, print thinking + answer, return (full_response, tool_results)."""
-    tp = ToolProcessor(registry)
+    tp = ToolProcessor(registry, soul_writer=_write_soul_section)
     response = await client.chat(
         model=model,
         messages=messages,
@@ -82,7 +144,6 @@ async def _stream_response(client, model: str, messages: list, registry: ToolReg
 
 
 async def _run_soul_update(client, model: str, registry: ToolRegistry) -> None:
-    """Run a one-shot soul update and write the result back to soul.md."""
     soul_content = _load_soul() or '(soul.md not found)'
     memory_content = _load_memory() or '(memory.md is empty)'
 
@@ -117,7 +178,6 @@ async def _run_soul_update(client, model: str, registry: ToolRegistry) -> None:
 
     print()
 
-    # Extract updated soul.md content (between first # heading and end)
     soul_start = full.find('# ')
     if soul_start != -1:
         updated_soul = full[soul_start:].strip()
@@ -128,6 +188,27 @@ async def _run_soul_update(client, model: str, registry: ToolRegistry) -> None:
         print('\n[soul_update] Could not extract updated soul.md -- no changes written.')
 
 
+def _print_help(registry: ToolRegistry) -> None:
+    print('\n-- REPL Commands ------------------------------------------')
+    print('  /?                  show REPL commands and tools')
+    print('  /tools              list all registered tools')
+    print('  /soul               print soul.md')
+    print('  /soul_reset         restore soul.md to default content')
+    print('  /soul_update        review memory and update User Profile in soul.md')
+    print('  /save_session       save the current session to JSON')
+    print('  /load_session <f>   load a saved session from JSON')
+    print('  /model <name>       switch the active Ollama model')
+    print('  /clear              clear conversation history')
+    print('  /quit               exit the agent')
+
+    print('\n-- Registered Tools ----------------------------------------')
+    for name, meta in registry.all().items():
+        danger = '  [DANGEROUS]' if meta.dangerous else ''
+        args = ', '.join(meta.arg_names) if meta.arg_names else 'no args'
+        print(f'  {name}({args}) -- {meta.description}{danger}')
+    print()
+
+
 async def main() -> None:
     registry = ToolRegistry()
     current_model = 'gemma4'
@@ -136,7 +217,7 @@ async def main() -> None:
     messages = list(system_messages)
 
     print('Agent ready.')
-    print('Commands: /tools, /save_session, /load_session <file>, /model <name>, /soul_update, /clear, /quit')
+    print('Type /? for help.')
 
     while True:
         user_message = input('\nYou: ').strip()
@@ -144,10 +225,12 @@ async def main() -> None:
         if not user_message:
             continue
 
-        # --- REPL commands ---
-
         if user_message == '/quit':
             break
+
+        if user_message == '/?':
+            _print_help(registry)
+            continue
 
         if user_message == '/clear':
             system_messages = _build_system_messages(registry)
@@ -164,10 +247,26 @@ async def main() -> None:
             print()
             continue
 
+        if user_message == '/soul':
+            soul = _load_soul() or SOUL_DEFAULT
+            print('\n-- soul.md ----------------------------------------------------\n')
+            print(soul)
+            print()
+            continue
+
+        if user_message == '/soul_reset':
+            answer = input('[soul_reset] Restore soul.md to default content? [y/N]: ')
+            if answer.strip().lower() in ('y', 'yes'):
+                with open(SOUL_FILE, 'w', encoding='utf-8') as f:
+                    f.write(SOUL_DEFAULT)
+                print('[soul_reset] soul.md restored to default.')
+            else:
+                print('[soul_reset] Cancelled.')
+            continue
+
         if user_message == '/save_session':
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f'session_{timestamp}.json'
-            # Exclude system messages from the saved file
             saveable = [m for m in messages if m['role'] != 'system']
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(saveable, f, indent=2, ensure_ascii=False)
@@ -203,8 +302,6 @@ async def main() -> None:
         if user_message == '/soul_update':
             await _run_soul_update(_client, current_model, registry)
             continue
-
-        # --- Normal chat turn ---
 
         messages.append({'role': 'user', 'content': user_message})
 

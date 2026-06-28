@@ -72,6 +72,12 @@ def _make_recall_memory() -> Callable:
     return recall_memory
 
 
+def _make_propose_soul_edit() -> Callable:
+    async def propose_soul_edit(section: str, proposed_content: str) -> str:
+        return Tools.propose_soul_edit(section, proposed_content)
+    return propose_soul_edit
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: Dict[str, ToolMeta] = {}
@@ -112,7 +118,7 @@ class ToolRegistry:
             'search_web',
             _make_search_web(),
             arg_names=['query'],
-            description='searches the web via DuckDuckGo and returns top 5 results',
+            description='searches the web via DDGS and returns top 5 results',
         )
         self.register_tool(
             'delete_file',
@@ -138,6 +144,12 @@ class ToolRegistry:
             _make_recall_memory(),
             arg_names=[],
             description='reads and returns all notes stored in memory.md',
+        )
+        self.register_tool(
+            'propose_soul_edit',
+            _make_propose_soul_edit(),
+            arg_names=['section', 'proposed_content'],
+            description='proposes an update to a soul.md section for user approval',
         )
 
     def register_tool(

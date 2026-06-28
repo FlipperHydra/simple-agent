@@ -1,7 +1,7 @@
 import os
 import urllib.request
 from datetime import datetime
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 
 class Tools:
@@ -110,3 +110,7 @@ class Tools:
             return content
         except FileNotFoundError:
             return '[recall_memory] No memory file found yet.'
+
+    @staticmethod
+    def propose_soul_edit(section: str, proposed_content: str) -> str:
+        return f'[propose_soul_edit] Proposed update for section: {section}'

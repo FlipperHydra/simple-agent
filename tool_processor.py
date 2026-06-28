@@ -3,6 +3,7 @@ import asyncio
 from typing import Any, Dict, List
 
 from tool_registry import ToolRegistry
+from prompts import soul_edit_proposal_display
 
 
 class ToolProcessor:
@@ -26,33 +27,28 @@ class ToolProcessor:
         flags=re.DOTALL,
     )
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(self, registry: ToolRegistry, soul_writer=None) -> None:
         self._registry = registry
+        self._soul_writer = soul_writer
         self._buffer: str = ""
         self._pattern: re.Pattern = self._build_pattern()
         self._results: List[Dict[str, str]] = []
         self._pending: List[tuple] = []
 
     def feed(self, chunk: Any) -> None:
-        """Feed a stream chunk into the buffer and collect complete tool blocks."""
-        text = getattr(chunk.message, "content", None) or ""
+        text = getattr(chunk.message, 'content', None) or ''
         if text:
             self._buffer += text
             self._collect_complete_blocks()
 
     async def finalize(self) -> None:
-        """
-        Called after the stream ends. Closes any orphaned open tool tag
-        so its content is not silently dropped, then dispatches all
-        pending tool calls.
-        """
         for name in self._registry.names():
-            open_tag = f"<{name}>"
-            close_tag = f"</{name}>"
+            open_tag = f'<{name}>'
+            close_tag = f'</{name}>'
             if open_tag in self._buffer and close_tag not in self._buffer:
-                self._buffer += f"\n{close_tag}"
+                self._buffer += f'\n{close_tag}'
         self._collect_complete_blocks()
-        self._buffer = ""
+        self._buffer = ''
 
         for tool_name, inner in self._pending:
             await self._dispatch(tool_name, inner)
@@ -64,7 +60,6 @@ class ToolProcessor:
         return results
 
     def rebuild_pattern(self) -> None:
-        """Call this if you register new tools after __init__."""
         self._pattern = self._build_pattern()
 
     def _build_pattern(self) -> re.Pattern:
@@ -72,11 +67,11 @@ class ToolProcessor:
         if not names:
             return re.compile(r'(?!)')
 
-        name_alts = "|".join(re.escape(n) for n in names)
+        name_alts = '|'.join(re.escape(n) for n in names)
         pattern = (
-            r"<({names})>"
-            r"\s*(.*?)\s*"
-            r"</\1>"
+            r'<({names})>'
+            r'\s*(.*?)\s*'
+            r'</\1>'
         ).format(names=name_alts)
         return re.compile(pattern, flags=re.DOTALL)
 
@@ -94,26 +89,46 @@ class ToolProcessor:
             if not match:
                 break
             tool_name = match.group(1)
-            inner     = match.group(2)
+            inner = match.group(2)
             self._pending.append((tool_name, inner))
             self._buffer = self._buffer[:match.start()] + self._buffer[match.end():]
 
     async def _confirm_dangerous(self, tool_name: str, args: List[str]) -> bool:
-        """Prompt the user to confirm a dangerous tool call. Non-blocking via executor."""
         args_preview = ', '.join(f'"{a[:40]}"' for a in args) if args else ''
         prompt = f'\n[!] DANGEROUS: {tool_name}({args_preview}) -- confirm? [y/N]: '
         loop = asyncio.get_event_loop()
         answer = await loop.run_in_executor(None, input, prompt)
         return answer.strip().lower() in ('y', 'yes')
 
+    async def _handle_soul_edit_proposal(self, section: str, proposed_content: str) -> None:
+        loop = asyncio.get_event_loop()
+        prompt = soul_edit_proposal_display(section, proposed_content)
+        answer = await loop.run_in_executor(None, input, prompt)
+
+        if answer.strip().lower() in ('y', 'yes'):
+            if self._soul_writer is not None:
+                self._soul_writer(section, proposed_content)
+                self._results.append({
+                    'tool': 'propose_soul_edit',
+                    'result': f"[soul_edit] Section '{section}' accepted."
+                })
+            else:
+                self._results.append({
+                    'tool': 'propose_soul_edit',
+                    'result': '[soul_edit] No soul writer configured.'
+                })
+        else:
+            self._results.append({
+                'tool': 'propose_soul_edit',
+                'result': '[soul_edit] rejected by user'
+            })
+
     async def _dispatch(self, tool_name: str, inner: str) -> None:
-        """Await the async tool function and store its result."""
         if tool_name not in self._registry:
             print(f"[ToolProcessor] Unknown tool: {tool_name!r} -- skipping")
             return
 
         args = self._parse_args(inner)
-
         args = [
             arg
             .replace('\\n', '\n')
@@ -121,6 +136,13 @@ class ToolProcessor:
             .replace("\\'", "'")
             for arg in args
         ]
+
+        if tool_name == 'propose_soul_edit':
+            if len(args) != 2:
+                print("[ToolProcessor] propose_soul_edit requires 2 arguments")
+                return
+            await self._handle_soul_edit_proposal(args[0], args[1])
+            return
 
         meta = self._registry.meta(tool_name)
         if meta and meta.dangerous:

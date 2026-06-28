@@ -15,6 +15,7 @@ from prompts import (
     soul_prompt,
     soul_update_prompt,
 )
+from research_prompt import RESEARCH_PROMPT
 
 _client = ollama.AsyncClient()
 
@@ -181,6 +182,7 @@ def _build_system_messages(registry: ToolRegistry) -> list:
         {'role': 'system', 'content': FORMAT_PROMPT},
         {'role': 'system', 'content': REASONING_PROMPT},
         {'role': 'system', 'content': MEMORY_PROMPT},
+        {'role': 'system', 'content': RESEARCH_PROMPT},
     ]
     soul = _load_soul()
     if soul:
@@ -299,7 +301,15 @@ async def main() -> None:
     system_messages = _build_system_messages(registry)
     messages = list(system_messages)
 
+    # Inject current datetime so the agent has temporal context from the start
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    messages.append({
+        'role': 'system',
+        'content': f'Session started at: {now}',
+    })
+
     print('Agent ready.')
+    print(f'Session time: {now}')
     print('Type /? for help.')
 
     while True:
@@ -318,6 +328,11 @@ async def main() -> None:
         if user_message == '/clear':
             system_messages = _build_system_messages(registry)
             messages = list(system_messages)
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            messages.append({
+                'role': 'system',
+                'content': f'Session restarted at: {now}',
+            })
             print('[History cleared]')
             continue
 

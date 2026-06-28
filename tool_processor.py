@@ -1,6 +1,6 @@
 import re
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from tool_registry import ToolRegistry
 from prompts import soul_edit_proposal_display
@@ -15,11 +15,9 @@ class ToolProcessor:
         <arg2>value two</arg2>
         </tool_name>
 
-    Tag names are derived dynamically from the registry, so any newly
-    registered tool is automatically recognised -- no changes needed here.
-    Single-argument tools still work -- they just use <arg1> only.
-    Tools flagged as dangerous=True will prompt the user for confirmation
-    before executing.
+    Tools flagged as dangerous=True prompt the user for confirmation.
+    propose_soul_edit is intercepted specially -- it shows the existing
+    section content alongside the proposed addition before confirming.
     """
 
     _ARG_PATTERN = re.compile(
@@ -27,10 +25,16 @@ class ToolProcessor:
         flags=re.DOTALL,
     )
 
-    def __init__(self, registry: ToolRegistry, soul_writer=None) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        soul_writer: Optional[Callable[[str, str], None]] = None,
+        soul_reader: Optional[Callable[[str], str]] = None,
+    ) -> None:
         self._registry = registry
         self._soul_writer = soul_writer
-        self._buffer: str = ""
+        self._soul_reader = soul_reader
+        self._buffer: str = ''
         self._pattern: re.Pattern = self._build_pattern()
         self._results: List[Dict[str, str]] = []
         self._pending: List[tuple] = []
@@ -49,7 +53,6 @@ class ToolProcessor:
                 self._buffer += f'\n{close_tag}'
         self._collect_complete_blocks()
         self._buffer = ''
-
         for tool_name, inner in self._pending:
             await self._dispatch(tool_name, inner)
         self._pending.clear()
@@ -66,7 +69,6 @@ class ToolProcessor:
         names = self._registry.names()
         if not names:
             return re.compile(r'(?!)')
-
         name_alts = '|'.join(re.escape(n) for n in names)
         pattern = (
             r'<({names})>'
@@ -88,9 +90,7 @@ class ToolProcessor:
             match = self._pattern.search(self._buffer)
             if not match:
                 break
-            tool_name = match.group(1)
-            inner = match.group(2)
-            self._pending.append((tool_name, inner))
+            self._pending.append((match.group(1), match.group(2)))
             self._buffer = self._buffer[:match.start()] + self._buffer[match.end():]
 
     async def _confirm_dangerous(self, tool_name: str, args: List[str]) -> bool:
@@ -101,8 +101,12 @@ class ToolProcessor:
         return answer.strip().lower() in ('y', 'yes')
 
     async def _handle_soul_edit_proposal(self, section: str, proposed_content: str) -> None:
+        existing = ''
+        if self._soul_reader is not None:
+            existing = self._soul_reader(section)
+
         loop = asyncio.get_event_loop()
-        prompt = soul_edit_proposal_display(section, proposed_content)
+        prompt = soul_edit_proposal_display(section, proposed_content, existing)
         answer = await loop.run_in_executor(None, input, prompt)
 
         if answer.strip().lower() in ('y', 'yes'):
@@ -110,7 +114,7 @@ class ToolProcessor:
                 self._soul_writer(section, proposed_content)
                 self._results.append({
                     'tool': 'propose_soul_edit',
-                    'result': f"[soul_edit] Section '{section}' accepted."
+                    'result': f"[soul_edit] Section '{section}' accepted and updated."
                 })
             else:
                 self._results.append({
@@ -139,7 +143,7 @@ class ToolProcessor:
 
         if tool_name == 'propose_soul_edit':
             if len(args) != 2:
-                print("[ToolProcessor] propose_soul_edit requires 2 arguments")
+                print('[ToolProcessor] propose_soul_edit requires 2 arguments')
                 return
             await self._handle_soul_edit_proposal(args[0], args[1])
             return
@@ -161,9 +165,6 @@ class ToolProcessor:
             if asyncio.iscoroutine(result):
                 result = await result
             if result is not None:
-                self._results.append({
-                    'tool': tool_name,
-                    'result': str(result)
-                })
+                self._results.append({'tool': tool_name, 'result': str(result)})
         except TypeError as e:
             print(f"[ToolProcessor] Argument mismatch for {tool_name!r}: {e}")

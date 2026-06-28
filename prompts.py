@@ -15,9 +15,7 @@ def tool_prompt(registry: 'ToolRegistry') -> str:
                 f'<arg{i+1}>\nexample {label} here\n</arg{i+1}>'
                 for i, label in enumerate(meta.arg_names)
             )
-            example_blocks.append(
-                f'<{name}>\n{inner}\n</{name}>'
-            )
+            example_blocks.append(f'<{name}>\n{inner}\n</{name}>')
         else:
             example_blocks.append(f'<{name}></{name}>')
     examples = '\n\n'.join(example_blocks)
@@ -85,7 +83,21 @@ Use it to propose changes to your own soul.md document.
 
   propose_soul_edit(section, proposed_content)
     section          -- the exact ## heading name to update, e.g. 'User Profile'
-    proposed_content -- the full replacement text for that section
+    proposed_content -- the new content to add or the replacement text
+
+SECTION TYPES
+Soul sections fall into two types that determine how edits are handled:
+
+List sections: Values, Constraints, User Profile
+  These sections contain letter-prefixed entries such as A., B., C.
+  For these sections, write only the NEW entry to add -- do not include
+  the full section or existing entries. The system assigns the next
+  letter automatically. Do not prefix your entry with a letter.
+  Example: 'Do not use sycophantic phrasing in any response.'
+
+Prose sections: Identity, Voice and Tone
+  These sections contain flowing paragraphs.
+  For these sections, write the complete replacement text for the section.
 
 WHEN TO CALL THIS TOOL
 The following events are clear signals to propose a soul edit.
@@ -117,10 +129,10 @@ RULES FOR PROPOSING EDITS
 2. Propose only on clear, durable signals. Do not propose on vague,
    one-off, or ambiguous statements.
 3. Do not re-propose a change the user rejected earlier in this session.
-4. When writing proposed_content, preserve the letter-prefix list style
-   used in the current soul.md. Do not introduce bullets or dashes.
-5. User Profile entries should be written as factual statements, not
-   instructions. Example: 'The user lives in America and works in software.'
+4. For list sections, write only the new entry text -- no letter prefix.
+   The system appends it after the last existing entry automatically.
+5. User Profile entries should be written as factual statements.
+   Example: 'The user lives in America and works in software.'
 6. For Constraints and Values entries, write as behavioral rules using
    the same imperative style as existing entries.
 """
@@ -155,11 +167,19 @@ YOUR TASK:
 """
 
 
-def soul_edit_proposal_display(section: str, proposed_content: str) -> str:
+def soul_edit_proposal_display(section: str, proposed_content: str, existing_content: str = '') -> str:
+    existing_block = ''
+    if existing_content and not existing_content.startswith('(No profile'):
+        existing_block = f'Existing :\n{existing_content}\n\n'
+    else:
+        existing_block = 'Existing : (empty)\n\n'
+
     return (
         f'\n-- Soul Edit Proposed --------------------------------------\n'
-        f'Section : {section}\n'
-        f'Proposed: {proposed_content}\n'
+        f'Section  : {section}\n'
+        f'{existing_block}'
+        f'Proposed : {proposed_content}\n'
+        f'------------------------------------------------------------\n'
         f'Accept this change? [y/N]: '
     )
 

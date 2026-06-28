@@ -1,9 +1,10 @@
 import re
 import asyncio
 import inspect
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from tool_registry import ToolRegistry
+from prompts import soul_edit_proposal_display, soul_remove_proposal_display
 
 
 class ToolProcessor:
@@ -16,8 +17,9 @@ class ToolProcessor:
         </tool_name>
 
     Tag names are derived dynamically from the registry, so any newly
-    registered tool is automatically recognised — no changes needed here.
-    Single-argument tools still work — they just use <arg1> only.
+    registered tool is automatically recognised -- no changes needed here.
+    propose_soul_edit and propose_soul_remove are intercepted specially
+    before the registry lookup.
     """
 
     _ARG_PATTERN = re.compile(
@@ -25,8 +27,17 @@ class ToolProcessor:
         flags=re.DOTALL,
     )
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        soul_writer: Optional[Callable[[str, str], None]] = None,
+        soul_reader: Optional[Callable[[str], str]] = None,
+        soul_remover: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self._registry = registry
+        self._soul_writer = soul_writer
+        self._soul_reader = soul_reader
+        self._soul_remover = soul_remover
         self._buffer: str = ""
         self._pattern: re.Pattern = self._build_pattern()
         self._results: List[Dict[str, str]] = []
@@ -43,6 +54,10 @@ class ToolProcessor:
             close_tag = f"</{name}>"
             if open_tag in self._buffer and close_tag not in self._buffer:
                 self._buffer += f"\n{close_tag}"
+        # Also close soul tool tags if they appear unclosed
+        for soul_tag in ('propose_soul_edit', 'propose_soul_remove'):
+            if f'<{soul_tag}>' in self._buffer and f'</{soul_tag}>' not in self._buffer:
+                self._buffer += f'\n</{soul_tag}>'
         await self._flush_complete_blocks_async()
         self._buffer = ""
 
@@ -55,10 +70,9 @@ class ToolProcessor:
         self._pattern = self._build_pattern()
 
     def _build_pattern(self) -> re.Pattern:
-        names = self._registry.names()
+        names = list(self._registry.names()) + ['propose_soul_edit', 'propose_soul_remove']
         if not names:
             return re.compile(r'(?!)')
-
         name_alts = "|".join(re.escape(n) for n in names)
         pattern = (
             r"<({names})>"
@@ -69,10 +83,8 @@ class ToolProcessor:
 
     def _parse_args(self, inner: str) -> List[str]:
         matches = self._ARG_PATTERN.findall(inner)
-
         if not matches:
             return [inner.strip()]
-
         ordered = sorted(matches, key=lambda m: int(m[0]))
         return [value for _, value in ordered]
 
@@ -82,7 +94,10 @@ class ToolProcessor:
             if not match:
                 break
             tool_name = match.group(1)
-            inner     = match.group(2)
+            inner = match.group(2)
+            # Soul tools are always async -- skip sync flush, handle in finalize
+            if tool_name in ('propose_soul_edit', 'propose_soul_remove'):
+                break
             func = self._registry.get(tool_name)
             if func is not None and not inspect.iscoroutinefunction(func):
                 self._dispatch_sync(tool_name, inner)
@@ -94,13 +109,13 @@ class ToolProcessor:
             if not match:
                 break
             tool_name = match.group(1)
-            inner     = match.group(2)
+            inner = match.group(2)
             await self._dispatch(tool_name, inner)
             self._buffer = self._buffer[:match.start()] + self._buffer[match.end():]
 
     def _dispatch_sync(self, tool_name: str, inner: str) -> None:
         if tool_name not in self._registry:
-            print(f"[ToolProcessor] Unknown tool: {tool_name!r} — skipping")
+            print(f"[ToolProcessor] Unknown tool: {tool_name!r} -- skipping")
             return
 
         args = self._parse_args(inner)
@@ -117,16 +132,78 @@ class ToolProcessor:
         except TypeError as e:
             print(f"[ToolProcessor] Argument mismatch for {tool_name!r}: {e}")
 
-    async def _dispatch(self, tool_name: str, inner: str) -> None:
-        if tool_name not in self._registry:
-            print(f"[ToolProcessor] Unknown tool: {tool_name!r} — skipping")
-            return
+    async def _handle_soul_edit_proposal(self, section: str, proposed_content: str) -> None:
+        existing = self._soul_reader(section) if self._soul_reader else ''
+        loop = asyncio.get_event_loop()
+        prompt = soul_edit_proposal_display(section, proposed_content, existing)
+        answer = await loop.run_in_executor(None, input, prompt)
 
+        if answer.strip().lower() in ('y', 'yes'):
+            if self._soul_writer:
+                self._soul_writer(section, proposed_content)
+                self._results.append({
+                    'tool': 'propose_soul_edit',
+                    'result': f"[soul_edit] Section '{section}' accepted and updated."
+                })
+            else:
+                self._results.append({
+                    'tool': 'propose_soul_edit',
+                    'result': '[soul_edit] No soul writer configured.'
+                })
+        else:
+            self._results.append({
+                'tool': 'propose_soul_edit',
+                'result': '[soul_edit] rejected by user'
+            })
+
+    async def _handle_soul_remove_proposal(self, section: str) -> None:
+        existing = self._soul_reader(section) if self._soul_reader else ''
+        loop = asyncio.get_event_loop()
+        prompt = soul_remove_proposal_display(section, existing)
+        answer = await loop.run_in_executor(None, input, prompt)
+
+        if answer.strip().lower() in ('y', 'yes'):
+            if self._soul_remover:
+                self._soul_remover(section)
+                self._results.append({
+                    'tool': 'propose_soul_remove',
+                    'result': f"[soul_remove] Section '{section}' removed."
+                })
+            else:
+                self._results.append({
+                    'tool': 'propose_soul_remove',
+                    'result': '[soul_remove] No soul remover configured.'
+                })
+        else:
+            self._results.append({
+                'tool': 'propose_soul_remove',
+                'result': '[soul_remove] rejected by user'
+            })
+
+    async def _dispatch(self, tool_name: str, inner: str) -> None:
         args = self._parse_args(inner)
         args = [
             arg.replace('\\n', '\n').replace('\\t', '\t').replace("\\'", "'")
             for arg in args
         ]
+
+        if tool_name == 'propose_soul_edit':
+            if len(args) != 2:
+                print('[ToolProcessor] propose_soul_edit requires 2 arguments')
+                return
+            await self._handle_soul_edit_proposal(args[0], args[1])
+            return
+
+        if tool_name == 'propose_soul_remove':
+            if len(args) != 1:
+                print('[ToolProcessor] propose_soul_remove requires 1 argument')
+                return
+            await self._handle_soul_remove_proposal(args[0])
+            return
+
+        if tool_name not in self._registry:
+            print(f"[ToolProcessor] Unknown tool: {tool_name!r} -- skipping")
+            return
 
         func = self._registry.get(tool_name)
         try:

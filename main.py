@@ -21,6 +21,25 @@ _client = ollama.AsyncClient()
 
 SOUL_FILE = 'soul.md'
 MEMORY_FILE = 'memory.md'
+
+# Context window passed to Ollama on every chat call.
+# 16384 tokens gives comfortable room for system prompts (~4k) plus long conversations.
+# Raise to 32768 if your hardware supports it; lower to 8192 to save VRAM.
+NUM_CTX = 16384
+
+# Maximum number of conversation turns (user + assistant pairs) kept in the
+# rolling window.  System messages are always pinned and never trimmed.
+MAX_TURNS = 40
+
+# Keywords that trigger inclusion of RESEARCH_PROMPT in the system messages.
+# When none of these appear in the user message, the ~1080-token prompt is omitted.
+_RESEARCH_KEYWORDS = (
+    'search', 'find', 'look up', 'lookup', 'research', 'what is', 'what are',
+    'who is', 'who are', 'how does', 'how do', 'when did', 'when was',
+    'where is', 'why did', 'explain', 'define', 'tell me about', 'summarize',
+    'compare', 'latest', 'recent', 'news', 'fetch', 'url', 'http',
+)
+
 SOUL_DEFAULT = """# Soul
 
 ## Identity
@@ -175,32 +194,77 @@ def _remove_soul_section(section: str) -> None:
     print(f"[soul_remove] Section '{section}' removed from soul.md.")
 
 
-def _build_system_messages(registry: ToolRegistry) -> list:
+def _needs_research(user_message: str) -> bool:
+    """Return True if the message likely requires web search or research tools."""
+    lower = user_message.lower()
+    return any(kw in lower for kw in _RESEARCH_KEYWORDS)
+
+
+def _build_system_messages(registry: ToolRegistry, user_message: str = '') -> list:
     messages = [
         {'role': 'system', 'content': tool_prompt(registry)},
         {'role': 'system', 'content': FORMAT_PROMPT},
         {'role': 'system', 'content': REASONING_PROMPT},
         {'role': 'system', 'content': MEMORY_PROMPT},
-        {'role': 'system', 'content': RESEARCH_PROMPT},
     ]
+    if _needs_research(user_message):
+        messages.append({'role': 'system', 'content': RESEARCH_PROMPT})
     soul = _load_soul()
     if soul:
         messages.append({'role': 'system', 'content': soul_prompt(soul)})
     return messages
 
 
-async def _stream_response(client, model: str, messages: list, registry: ToolRegistry):
+def _trim_messages(system_messages: list, conversation: list) -> list:
+    """Return system messages pinned at the front plus the last MAX_TURNS turns.
+
+    A 'turn' is one user message plus the assistant reply that follows it
+    (and any tool-result messages in between).  We count assistant messages
+    as turn boundaries and keep the most recent MAX_TURNS of them.
+    """
+    if not conversation:
+        return list(system_messages)
+
+    # Walk backwards and collect up to MAX_TURNS assistant messages worth of history.
+    turn_count = 0
+    cutoff = len(conversation)
+    for i in range(len(conversation) - 1, -1, -1):
+        if conversation[i]['role'] == 'assistant':
+            turn_count += 1
+            if turn_count >= MAX_TURNS:
+                cutoff = i
+                break
+
+    trimmed = conversation[cutoff:]
+    if len(trimmed) < len(conversation):
+        dropped = len(conversation) - len(trimmed)
+        print(f'[context] Trimmed {dropped} old message(s) to stay within {MAX_TURNS}-turn window.')
+
+    return list(system_messages) + trimmed
+
+
+async def _stream_response(
+    client,
+    model: str,
+    system_messages: list,
+    conversation: list,
+    registry: ToolRegistry,
+):
     tp = ToolProcessor(
         registry,
         soul_writer=_write_soul_section,
         soul_reader=_get_soul_section,
         soul_remover=_remove_soul_section,
     )
+
+    messages = _trim_messages(system_messages, conversation)
+
     response = await client.chat(
         model=model,
         messages=messages,
         think=True,
         stream=True,
+        options={'num_ctx': NUM_CTX},
     )
 
     full_response = ''
@@ -241,6 +305,7 @@ async def _run_soul_update(client, model: str, registry: ToolRegistry) -> None:
         messages=update_messages,
         think=True,
         stream=True,
+        options={'num_ctx': NUM_CTX},
     )
 
     full = ''
@@ -280,6 +345,7 @@ def _print_help(registry: ToolRegistry) -> None:
     print('  /save_session       save the current session to JSON')
     print('  /load_session <f>   load a saved session from JSON')
     print('  /model <name>       switch the active Ollama model')
+    print('  /history            show a summary of the current conversation history')
     print('  /clear              clear conversation history')
     print('  /quit               exit the agent')
     print('\n-- Registered Tools ----------------------------------------')
@@ -290,6 +356,9 @@ def _print_help(registry: ToolRegistry) -> None:
     print('\n-- Soul Tools (intercepted, not in registry) ---------------')
     print('  propose_soul_edit(section, proposed_content)')
     print('  propose_soul_remove(section)')
+    print(f'\n-- Context Settings ----------------------------------------')
+    print(f'  NUM_CTX   = {NUM_CTX} tokens')
+    print(f'  MAX_TURNS = {MAX_TURNS} turns')
     print()
 
 
@@ -297,8 +366,9 @@ async def main() -> None:
     registry = ToolRegistry()
     current_model = 'gemma4'
 
+    # conversation holds only non-system messages; system_messages are rebuilt per-turn
     system_messages = _build_system_messages(registry)
-    messages = list(system_messages)
+    conversation: list = []
 
     print('Agent ready.')
     print('Type /? for help.')
@@ -318,7 +388,7 @@ async def main() -> None:
 
         if user_message == '/clear':
             system_messages = _build_system_messages(registry)
-            messages = list(system_messages)
+            conversation = []
             print('[History cleared]')
             continue
 
@@ -329,6 +399,17 @@ async def main() -> None:
                 args = ', '.join(meta.arg_names) if meta.arg_names else 'no args'
                 print(f'  {name}({args}) -- {meta.description}{danger}')
             print()
+            continue
+
+        if user_message == '/history':
+            if not conversation:
+                print('[history] No conversation history yet.')
+            else:
+                print(f'\n-- Conversation History ({len(conversation)} messages) ----------')
+                for i, m in enumerate(conversation):
+                    preview = m['content'].replace('\n', ' ')[:80]
+                    print(f'  [{i:02d}] {m["role"]:10s}  {preview}')
+                print()
             continue
 
         if user_message == '/soul':
@@ -351,10 +432,9 @@ async def main() -> None:
         if user_message == '/save_session':
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f'session_{timestamp}.json'
-            saveable = [m for m in messages if m['role'] != 'system']
             with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(saveable, f, indent=2, ensure_ascii=False)
-            print(f'[save_session] Saved {len(saveable)} messages to {filename}')
+                json.dump(conversation, f, indent=2, ensure_ascii=False)
+            print(f'[save_session] Saved {len(conversation)} messages to {filename}')
             continue
 
         if user_message.startswith('/load_session'):
@@ -366,7 +446,7 @@ async def main() -> None:
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
-                messages = list(system_messages) + loaded
+                conversation = loaded
                 print(f'[load_session] Loaded {len(loaded)} messages from {filepath}')
             except FileNotFoundError:
                 print(f'[load_session] File not found: {filepath}')
@@ -387,24 +467,27 @@ async def main() -> None:
             await _run_soul_update(_client, current_model, registry)
             continue
 
-        messages.append({'role': 'user', 'content': user_message})
+        # Rebuild system messages for this turn (injects RESEARCH_PROMPT only if needed)
+        system_messages = _build_system_messages(registry, user_message)
+
+        conversation.append({'role': 'user', 'content': user_message})
 
         full_response, tool_results = await _stream_response(
-            _client, current_model, messages, registry
+            _client, current_model, system_messages, conversation, registry
         )
-        messages.append({'role': 'assistant', 'content': full_response})
+        conversation.append({'role': 'assistant', 'content': full_response})
 
         for tr in tool_results:
-            messages.append({
+            conversation.append({
                 'role': 'user',
                 'content': f"[Tool result: {tr['tool']}]\n{tr['result']}"
             })
 
         if tool_results:
             followup_response, _ = await _stream_response(
-                _client, current_model, messages, registry
+                _client, current_model, system_messages, conversation, registry
             )
-            messages.append({'role': 'assistant', 'content': followup_response})
+            conversation.append({'role': 'assistant', 'content': followup_response})
 
     print('\n[Session complete]')
 

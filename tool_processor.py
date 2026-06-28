@@ -17,9 +17,10 @@ class ToolProcessor:
     Tag names are derived dynamically from the registry, so any newly
     registered tool is automatically recognised -- no changes needed here.
     Single-argument tools still work -- they just use <arg1> only.
+    Tools flagged as dangerous=True will prompt the user for confirmation
+    before executing.
     """
 
-    # Matches one <argN>...</argN> block (N is any positive integer)
     _ARG_PATTERN = re.compile(
         r"<arg(\d+)>\s*(.*?)\s*</arg\1>",
         flags=re.DOTALL,
@@ -30,7 +31,7 @@ class ToolProcessor:
         self._buffer: str = ""
         self._pattern: re.Pattern = self._build_pattern()
         self._results: List[Dict[str, str]] = []
-        self._pending: List[tuple] = []  # (tool_name, inner) pairs awaiting dispatch
+        self._pending: List[tuple] = []
 
     def feed(self, chunk: Any) -> None:
         """Feed a stream chunk into the buffer and collect complete tool blocks."""
@@ -58,10 +59,6 @@ class ToolProcessor:
         self._pending.clear()
 
     def flush_results(self) -> List[Dict[str, str]]:
-        """
-        Returns all tool results captured since the last flush, then clears
-        the internal list. Each entry is {"tool": name, "result": str}.
-        """
         results = list(self._results)
         self._results.clear()
         return results
@@ -71,11 +68,6 @@ class ToolProcessor:
         self._pattern = self._build_pattern()
 
     def _build_pattern(self) -> re.Pattern:
-        """
-        Builds a single regex that matches any registered tool block, e.g.:
-            <write_tool>...</write_tool>
-        Capturing groups: (1) tool name, (2) full inner content.
-        """
         names = self._registry.names()
         if not names:
             return re.compile(r'(?!)')
@@ -89,21 +81,14 @@ class ToolProcessor:
         return re.compile(pattern, flags=re.DOTALL)
 
     def _parse_args(self, inner: str) -> List[str]:
-        """
-        Extracts ordered arguments from the inner content of a tool block.
-        Falls back to treating the entire inner string as one argument if
-        no <argN> tags are found.
-        """
         matches = self._ARG_PATTERN.findall(inner)
-
         if not matches:
-            return [inner.strip()]
-
+            stripped = inner.strip()
+            return [stripped] if stripped else []
         ordered = sorted(matches, key=lambda m: int(m[0]))
         return [value for _, value in ordered]
 
     def _collect_complete_blocks(self) -> None:
-        """Pull complete tool blocks out of the buffer into the pending queue."""
         while True:
             match = self._pattern.search(self._buffer)
             if not match:
@@ -112,6 +97,14 @@ class ToolProcessor:
             inner     = match.group(2)
             self._pending.append((tool_name, inner))
             self._buffer = self._buffer[:match.start()] + self._buffer[match.end():]
+
+    async def _confirm_dangerous(self, tool_name: str, args: List[str]) -> bool:
+        """Prompt the user to confirm a dangerous tool call. Non-blocking via executor."""
+        args_preview = ', '.join(f'"{a[:40]}"' for a in args) if args else ''
+        prompt = f'\n[!] DANGEROUS: {tool_name}({args_preview}) -- confirm? [y/N]: '
+        loop = asyncio.get_event_loop()
+        answer = await loop.run_in_executor(None, input, prompt)
+        return answer.strip().lower() in ('y', 'yes')
 
     async def _dispatch(self, tool_name: str, inner: str) -> None:
         """Await the async tool function and store its result."""
@@ -129,16 +122,26 @@ class ToolProcessor:
             for arg in args
         ]
 
+        meta = self._registry.meta(tool_name)
+        if meta and meta.dangerous:
+            confirmed = await self._confirm_dangerous(tool_name, args)
+            if not confirmed:
+                print(f'[ToolProcessor] {tool_name} cancelled by user.')
+                self._results.append({
+                    'tool': tool_name,
+                    'result': '[cancelled by user -- dangerous tool was not executed]'
+                })
+                return
+
         func = self._registry.get(tool_name)
         try:
             result = func(*args)
-            # Await if the function returned a coroutine (async tool)
             if asyncio.iscoroutine(result):
                 result = await result
             if result is not None:
                 self._results.append({
-                    "tool": tool_name,
-                    "result": str(result)
+                    'tool': tool_name,
+                    'result': str(result)
                 })
         except TypeError as e:
             print(f"[ToolProcessor] Argument mismatch for {tool_name!r}: {e}")

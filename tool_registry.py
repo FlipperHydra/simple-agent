@@ -7,6 +7,7 @@ class ToolMeta(NamedTuple):
     func: Callable[..., Any]
     arg_names: List[str]
     description: str
+    dangerous: bool = False
 
 
 def _make_write_tool() -> Callable:
@@ -45,6 +46,30 @@ def _make_search_web() -> Callable:
     async def search_web(query: str) -> str:
         return Tools.search_web(query)
     return search_web
+
+
+def _make_delete_file() -> Callable:
+    async def delete_file(filename: str) -> str:
+        return Tools.delete_file(filename)
+    return delete_file
+
+
+def _make_make_directory() -> Callable:
+    async def make_directory(path: str) -> str:
+        return Tools.make_directory(path)
+    return make_directory
+
+
+def _make_append_memory() -> Callable:
+    async def append_memory(note: str) -> str:
+        return Tools.append_memory(note)
+    return append_memory
+
+
+def _make_recall_memory() -> Callable:
+    async def recall_memory() -> str:
+        return Tools.recall_memory()
+    return recall_memory
 
 
 class ToolRegistry:
@@ -89,12 +114,46 @@ class ToolRegistry:
             arg_names=['query'],
             description='searches the web via DuckDuckGo and returns top 5 results',
         )
+        self.register_tool(
+            'delete_file',
+            _make_delete_file(),
+            arg_names=['filename'],
+            description='permanently deletes a file from disk [DANGEROUS]',
+            dangerous=True,
+        )
+        self.register_tool(
+            'make_directory',
+            _make_make_directory(),
+            arg_names=['path'],
+            description='creates a directory and any missing parent directories',
+        )
+        self.register_tool(
+            'append_memory',
+            _make_append_memory(),
+            arg_names=['note'],
+            description='appends a timestamped note to memory.md for persistent recall',
+        )
+        self.register_tool(
+            'recall_memory',
+            _make_recall_memory(),
+            arg_names=[],
+            description='reads and returns all notes stored in memory.md',
+        )
 
-    def register_tool(self, name, func, *, arg_names=None, description='') -> None:
+    def register_tool(
+        self,
+        name: str,
+        func: Callable,
+        *,
+        arg_names: List[str] = None,
+        description: str = '',
+        dangerous: bool = False,
+    ) -> None:
         self._tools[name] = ToolMeta(
             func=func,
-            arg_names=arg_names or ['arg'],
+            arg_names=arg_names or [],
             description=description,
+            dangerous=dangerous,
         )
 
     def get(self, name: str) -> Callable[..., Any] | None:
@@ -113,14 +172,22 @@ class ToolRegistry:
     def tag_descriptions(self) -> List[str]:
         blocks = []
         for name, meta in self._tools.items():
-            inner = '\n'.join(
-                f'  <arg{i+1}>{label}</arg{i+1}>'
-                for i, label in enumerate(meta.arg_names)
-            )
-            blocks.append(
-                f'  {name} -- {meta.description}\n'
-                f'  <{name}>\n{inner}\n  </{name}>'
-            )
+            danger_tag = '  [DANGEROUS]' if meta.dangerous else ''
+            if meta.arg_names:
+                inner = '\n'.join(
+                    f'  <arg{i+1}>{label}</arg{i+1}>'
+                    for i, label in enumerate(meta.arg_names)
+                )
+                block = (
+                    f'  {name} -- {meta.description}{danger_tag}\n'
+                    f'  <{name}>\n{inner}\n  </{name}>'
+                )
+            else:
+                block = (
+                    f'  {name} -- {meta.description}{danger_tag}\n'
+                    f'  <{name}></{name}>'
+                )
+            blocks.append(block)
         return blocks
 
     def __contains__(self, name: str) -> bool:

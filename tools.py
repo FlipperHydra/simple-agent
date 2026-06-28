@@ -1,5 +1,6 @@
 import os
 import urllib.request
+from datetime import datetime
 from duckduckgo_search import DDGS
 
 
@@ -71,3 +72,41 @@ class Tools:
             return '\n'.join(lines)
         except Exception as e:
             return f'[search_web] Error: {e}'
+
+    @staticmethod
+    def delete_file(filename: str) -> str:
+        try:
+            os.remove(filename)
+            return f'[delete_file] Deleted: {filename}'
+        except FileNotFoundError:
+            return f'[delete_file] File not found: {filename}'
+        except Exception as e:
+            return f'[delete_file] Error: {e}'
+
+    @staticmethod
+    def make_directory(path: str) -> str:
+        try:
+            os.makedirs(path, exist_ok=True)
+            return f'[make_directory] Created: {path}'
+        except Exception as e:
+            return f'[make_directory] Error: {e}'
+
+    @staticmethod
+    def append_memory(note: str) -> str:
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
+        entry = f'[{timestamp}] {note}'
+        with open('memory.md', 'a', encoding='utf-8') as f:
+            f.write(entry + '\n')
+        print(f'\n[append_memory] Stored -> {entry}')
+        return f'[append_memory] Stored note at {timestamp}'
+
+    @staticmethod
+    def recall_memory() -> str:
+        try:
+            with open('memory.md', 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            if not content:
+                return '[recall_memory] memory.md is empty.'
+            return content
+        except FileNotFoundError:
+            return '[recall_memory] No memory file found yet.'

@@ -10,13 +10,16 @@ def tool_prompt(registry: 'ToolRegistry') -> str:
 
     example_blocks = []
     for name, meta in registry.all().items():
-        inner = '\n'.join(
-            f'<arg{i+1}>\nexample {label} here\n</arg{i+1}>'
-            for i, label in enumerate(meta.arg_names)
-        )
-        example_blocks.append(
-            f'<{name}>\n{inner}\n</{name}>'
-        )
+        if meta.arg_names:
+            inner = '\n'.join(
+                f'<arg{i+1}>\nexample {label} here\n</arg{i+1}>'
+                for i, label in enumerate(meta.arg_names)
+            )
+            example_blocks.append(
+                f'<{name}>\n{inner}\n</{name}>'
+            )
+        else:
+            example_blocks.append(f'<{name}></{name}>')
     examples = '\n\n'.join(example_blocks)
 
     tag_list = ', '.join(f'</{n}>' for n in registry.names())
@@ -36,6 +39,10 @@ the tool's own tags:
   <arg2>second argument value</arg2>
   </tool_name>
 
+For tools with no arguments, use an empty tag pair:
+
+  <tool_name></tool_name>
+
 Rules:
 1. The opening tool tag must be on its own line.
 2. Each argument uses its own numbered tag: <arg1>, <arg2>, <arg3>, and so on.
@@ -47,10 +54,79 @@ Rules:
 8. Write your normal conversational reply outside the tool tags.
 9. Valid closing tool tags are: {tag_list}
 10. Always include all required arguments for a tool, in order starting from <arg1>.
+11. Tools marked [DANGEROUS] have destructive or irreversible effects.
+    Before calling a dangerous tool, state clearly what you are about to do
+    and why. Never call a dangerous tool speculatively or as a guess.
 
 EXAMPLES
 --------
 {examples}
+"""
+
+
+def soul_prompt(soul_content: str) -> str:
+    return f"""\
+AGENT IDENTITY AND CHARACTER
+----------------------------------------
+The following document defines your identity, voice, values, and
+known information about the user you are speaking with.
+Read it carefully. It governs how you present yourself in all responses.
+
+{soul_content}
+
+If the User Profile section is empty, treat the user as unknown and
+build an impression through conversation. Do not invent facts about
+the user that are not in this document.
+"""
+
+
+def soul_update_prompt(memory_content: str, soul_content: str) -> str:
+    return f"""\
+You are performing a soul update for this agent.
+
+Below is the agent's current soul.md document and the full contents
+of memory.md which records timestamped notes about the user across sessions.
+
+CURRENT SOUL.MD:
+{soul_content}
+
+MEMORY.MD CONTENTS:
+{memory_content}
+
+YOUR TASK:
+1. Read through memory.md carefully.
+2. Identify patterns in the user's preferred topics, their tone and
+   communication style, their recurring goals, and any personal facts
+   they have shared.
+3. List your insights as letter-prefixed items so the user can review
+   them before any changes are committed.
+4. Then rewrite ONLY the User Profile section of soul.md with a
+   concise, updated summary of the user based on those insights.
+5. Output the complete updated soul.md with all other sections unchanged.
+6. Use ASCII only. No bullets or dashes -- use letter prefixes for lists.
+7. Keep the User Profile section factual and grounded in memory only.
+   Do not speculate or invent traits not evidenced in memory.md.
+"""
+
+
+MEMORY_PROMPT = """\
+MEMORY TOOLS
+----------------------------------------
+You have access to two persistent memory tools:
+
+  append_memory -- stores a timestamped note to memory.md.
+  recall_memory -- reads all stored notes from memory.md.
+
+When to use these tools:
+A. Call append_memory when the user shares something meaningful about
+   themselves, their preferences, goals, or context that would be
+   useful to remember across sessions.
+B. Call append_memory when you complete a significant task the user
+   may want to reference or build upon in a future session.
+C. Call recall_memory at the start of a session when the user references
+   past context that is not present in the current message history.
+D. Do not spam memory. Only store genuinely useful, durable information.
+E. Do not store trivial, redundant, or one-off notes.
 """
 
 

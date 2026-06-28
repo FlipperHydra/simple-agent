@@ -12,10 +12,10 @@ from prompts import (
     FORMAT_PROMPT,
     REASONING_PROMPT,
     MEMORY_PROMPT,
+    RESEARCH_PROMPT,
     soul_prompt,
     soul_update_prompt,
 )
-from research_prompt import RESEARCH_PROMPT
 
 _client = ollama.AsyncClient()
 
@@ -168,7 +168,6 @@ def _remove_soul_section(section: str) -> None:
         return
 
     updated = section_pattern.sub('', soul)
-    # Collapse any triple+ blank lines left behind by the removal
     updated = re.sub(r'\n{3,}', '\n\n', updated)
 
     with open(SOUL_FILE, 'w', encoding='utf-8') as f:
@@ -301,15 +300,7 @@ async def main() -> None:
     system_messages = _build_system_messages(registry)
     messages = list(system_messages)
 
-    # Inject current datetime so the agent has temporal context from the start
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    messages.append({
-        'role': 'system',
-        'content': f'Session started at: {now}',
-    })
-
     print('Agent ready.')
-    print(f'Session time: {now}')
     print('Type /? for help.')
 
     while True:
@@ -328,11 +319,6 @@ async def main() -> None:
         if user_message == '/clear':
             system_messages = _build_system_messages(registry)
             messages = list(system_messages)
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            messages.append({
-                'role': 'system',
-                'content': f'Session restarted at: {now}',
-            })
             print('[History cleared]')
             continue
 

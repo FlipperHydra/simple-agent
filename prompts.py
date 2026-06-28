@@ -280,3 +280,86 @@ BEFORE PRODUCING YOUR RESPONSE
    If any check fails, correct the response before outputting it.
    Do not output a response that violates any instruction.
 """
+
+
+RESEARCH_PROMPT = """\
+RESEARCH SKILL
+----------------------------------------
+Load this skill whenever you need to perform a research task, including:
+A. Answering factual questions that require up-to-date information
+B. Multi-source research: comparing entities, building data tables, market analysis
+C. OSINT-style information gathering
+D. Any task where you must decide which tool to search with and how to form queries
+
+CORE PRINCIPLES
+----------------------------------------
+1. Search before asserting. Never answer a factual claim from memory alone.
+   Always verify with a search tool first, especially for statistics, prices,
+   dates, names, and recent events.
+2. Match the tool to the task:
+   A. search_web       -- current events, prices, time-sensitive facts
+   B. fetch_url        -- reading a specific known URL for full page content
+   C. search_and_fetch -- search plus auto-fetch of the top result in one call
+   D. multi_search     -- fire up to 5 independent queries in parallel
+3. Start broad, refine narrow. Begin with a general query to understand
+   the landscape. Add specificity only if initial results are too broad.
+4. Parallelize independent queries. Use multi_search when multiple distinct
+   topics must be researched simultaneously.
+5. Evaluate before citing. Prefer primary sources, official documentation,
+   and reputable outlets. Discard promotional or unverified results.
+6. Cite everything. Every factual sentence in the final answer must be backed
+   by an inline citation with a descriptive anchor. Never use generic anchors
+   like 'source', 'here', or 'link'.
+
+QUERY FORMULATION RULES
+----------------------------------------
+A. Write queries like a human searching Google -- natural phrases, not keyword dumps.
+B. One topic per query. Split multiple concepts into parallel queries.
+C. Keep queries short: 4 to 8 words is ideal.
+D. Include dates or timeframes when recency matters.
+   Example: inflation rate Canada 2025
+
+SEARCH WORKFLOW
+----------------------------------------
+1. Decompose: Break the user's question into discrete sub-questions.
+2. Select tools: Pick the right tool for each sub-question.
+3. Formulate: Write 1 to 3 short, focused queries per sub-question.
+4. Execute in parallel: Use multi_search for independent queries.
+   Run sequentially only when one result is needed to form the next query.
+5. Evaluate: Assess relevance, authority, recency, and corroboration.
+6. Synthesize: Combine findings into coherent prose or structured sections.
+7. Cite inline: Every factual claim gets a citation immediately after
+   the sentence, formatted as a descriptive anchor with a URL.
+
+MULTI-ROUND RESEARCH
+----------------------------------------
+If the first round reveals new terms, entities, or gaps:
+A. Identify what is missing or unclear.
+B. Formulate a second round of targeted queries to fill those gaps.
+C. Repeat until the goal is fully addressed. Two to three rounds maximum.
+
+SOURCE HIERARCHY -- HIGHEST TO LOWEST TRUST
+----------------------------------------
+1. Peer-reviewed academic publications
+2. Official government and institutional sources
+3. Primary company documentation: official docs, filings, press releases
+4. Reputable journalism: Reuters, AP, major newspapers
+5. Expert blogs and technical writeups by known practitioners
+6. General web results: use with corroboration
+
+WHAT NOT TO DO
+----------------------------------------
+A. Do not answer factual questions from training memory without searching first.
+B. Do not use a single query when parallel queries would cover more ground.
+C. Do not cite with generic anchors such as source, here, link, or article.
+D. Do not run more than 5 queries without pausing to synthesize findings.
+E. Do not stop at the first result for high-stakes factual claims. Corroborate.
+
+OUTPUT FORMAT
+----------------------------------------
+Structure research outputs with:
+A. Section headers for each major topic or sub-question
+B. Inline citations on every factual sentence
+C. Tables when comparing multiple entities across the same dimensions
+D. No raw URL dumps. All links must be embedded as descriptive anchors.
+"""

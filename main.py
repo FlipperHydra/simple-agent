@@ -104,17 +104,15 @@ def _next_letter(existing_content: str) -> str:
     last = max(matches, key=lambda c: ord(c))
     next_ord = ord(last) + 1
     if next_ord > ord('Z'):
-        return 'A'  # fallback -- unlikely to hit Z
+        return 'A'
     return chr(next_ord)
 
 
 def _is_list_section(section: str, existing_content: str) -> bool:
-    """A section is a list section if its name is known or it contains letter prefixes."""
     if section in _LIST_SECTIONS:
         return True
     if section in _PROSE_SECTIONS:
         return False
-    # Unknown section -- detect by content
     return bool(re.search(r'^[A-Z]\.', existing_content, flags=re.MULTILINE))
 
 
@@ -123,7 +121,6 @@ def _write_soul_section(section: str, new_content: str) -> None:
     existing_section = _parse_soul_sections(soul).get(section, '')
 
     if _is_list_section(section, existing_section):
-        # Strip any letter prefix the agent may have included -- we assign ours
         entry = re.sub(r'^[A-Z]\.\s*', '', new_content.strip())
         letter = _next_letter(existing_section)
         new_entry = f'{letter}. {entry}'
@@ -135,7 +132,6 @@ def _write_soul_section(section: str, new_content: str) -> None:
 
         replacement = merged
     else:
-        # Prose section -- full replace
         replacement = new_content.strip()
 
     section_pattern = re.compile(
@@ -157,6 +153,28 @@ def _write_soul_section(section: str, new_content: str) -> None:
     print(f"[soul] Section '{section}' updated.")
 
 
+def _remove_soul_section(section: str) -> None:
+    """Remove an entire ## section and its content from soul.md."""
+    soul = _load_soul() or SOUL_DEFAULT
+
+    section_pattern = re.compile(
+        rf'^##\s+{re.escape(section)}\n.*?(?=^##\s+|\Z)',
+        flags=re.MULTILINE | re.DOTALL,
+    )
+
+    if not section_pattern.search(soul):
+        print(f"[soul_remove] Section '{section}' not found in soul.md.")
+        return
+
+    updated = section_pattern.sub('', soul)
+    # Collapse any triple+ blank lines left behind by the removal
+    updated = re.sub(r'\n{3,}', '\n\n', updated)
+
+    with open(SOUL_FILE, 'w', encoding='utf-8') as f:
+        f.write(updated.strip() + '\n')
+    print(f"[soul_remove] Section '{section}' removed from soul.md.")
+
+
 def _build_system_messages(registry: ToolRegistry) -> list:
     messages = [
         {'role': 'system', 'content': tool_prompt(registry)},
@@ -175,6 +193,7 @@ async def _stream_response(client, model: str, messages: list, registry: ToolReg
         registry,
         soul_writer=_write_soul_section,
         soul_reader=_get_soul_section,
+        soul_remover=_remove_soul_section,
     )
     response = await client.chat(
         model=model,
@@ -267,6 +286,9 @@ def _print_help(registry: ToolRegistry) -> None:
         danger = '  [DANGEROUS]' if meta.dangerous else ''
         args = ', '.join(meta.arg_names) if meta.arg_names else 'no args'
         print(f'  {name}({args}) -- {meta.description}{danger}')
+    print('\n-- Soul Tools (intercepted, not in registry) ---------------')
+    print('  propose_soul_edit(section, proposed_content)')
+    print('  propose_soul_remove(section)')
     print()
 
 

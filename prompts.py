@@ -78,12 +78,14 @@ the user that are not in this document.
 
 SOUL EDITING RULES
 ----------------------------------------
-You have access to a tool called propose_soul_edit.
-Use it to propose changes to your own soul.md document.
+You have two tools for modifying your soul.md document:
 
   propose_soul_edit(section, proposed_content)
     section          -- the exact ## heading name to update, e.g. 'User Profile'
     proposed_content -- the new content to add or the replacement text
+
+  propose_soul_remove(section)
+    section          -- the exact ## heading name to remove entirely
 
 SECTION TYPES
 Soul sections fall into two types that determine how edits are handled:
@@ -99,7 +101,7 @@ Prose sections: Identity, Voice and Tone
   These sections contain flowing paragraphs.
   For these sections, write the complete replacement text for the section.
 
-WHEN TO CALL THIS TOOL
+WHEN TO CALL propose_soul_edit
 The following events are clear signals to propose a soul edit.
 For each signal, the affected section is listed.
 
@@ -122,6 +124,13 @@ D. The user gives you a name.
 E. The user states a durable preference about how you should work.
    Examples: 'I prefer code over explanation', 'always confirm before writing files'
    Section: User Profile -- and Constraints if it is a behavioral rule
+
+WHEN TO CALL propose_soul_remove
+Call this tool when the user explicitly asks to remove or delete a section
+from soul.md entirely.
+  Examples: 'remove the Constraints section', 'delete User Profile'
+The tool takes one argument: the exact ## heading name of the section to remove.
+Do not call this tool speculatively. Only call it on an explicit user request.
 
 RULES FOR PROPOSING EDITS
 1. If a single statement affects multiple sections, call propose_soul_edit
@@ -181,6 +190,21 @@ def soul_edit_proposal_display(section: str, proposed_content: str, existing_con
         f'Proposed : {proposed_content}\n'
         f'------------------------------------------------------------\n'
         f'Accept this change? [y/N]: '
+    )
+
+
+def soul_remove_proposal_display(section: str, existing_content: str = '') -> str:
+    existing_block = ''
+    if existing_content:
+        existing_block = f'\nContent that will be removed:\n{existing_content}\n'
+    else:
+        existing_block = '\n(Section appears to be empty or not found.)\n'
+
+    return (
+        f'\n-- Soul Remove Proposed ------------------------------------\n'
+        f'Section  : {section}{existing_block}'
+        f'------------------------------------------------------------\n'
+        f'Remove this section entirely? [y/N]: '
     )
 
 

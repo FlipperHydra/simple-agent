@@ -1,0 +1,21 @@
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Runtime files that should come from volumes, not the image
+memory.json
+soul.md
+output.txt
+session_*.json
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

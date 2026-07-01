@@ -1,0 +1,29 @@
+services:
+  simple-agent:
+    build: .
+    image: simple-agent:latest
+    container_name: simple-agent
+
+    # Required for interactive REPL (stdin + tty)
+    stdin_open: true
+    tty: true
+
+    # Persist memory and soul across container restarts
+    volumes:
+      - agent-memory:/app/memory.json
+      - agent-soul:/app/soul.md
+
+    # The agent connects to Ollama — point this at your host's Ollama instance.
+    # On Linux:  host.docker.internal may need --add-host, or use the host network below.
+    # On Mac/Win: host.docker.internal resolves automatically.
+    environment:
+      - OLLAMA_HOST=http://host.docker.internal:11434
+
+    # Alternatively, use host networking on Linux so the container shares
+    # the host network stack and can reach Ollama at localhost:11434 directly.
+    # Uncomment the two lines below and remove the environment block above:
+    # network_mode: host
+
+volumes:
+  agent-memory:
+  agent-soul:

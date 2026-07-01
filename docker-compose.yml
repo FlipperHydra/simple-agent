@@ -8,22 +8,25 @@ services:
     stdin_open: true
     tty: true
 
-    # Persist memory and soul across container restarts
+    # Persist ALL state across restarts via a single data-directory volume.
+    # (A directory volume works correctly; the old per-file volumes turned
+    # memory.json / soul.md into directories and broke reads/writes.)
     volumes:
-      - agent-memory:/app/memory.json
-      - agent-soul:/app/soul.md
+      - agent-data:/app/data
 
     # The agent connects to Ollama — point this at your host's Ollama instance.
     # On Linux:  host.docker.internal may need --add-host, or use the host network below.
     # On Mac/Win: host.docker.internal resolves automatically.
     environment:
       - OLLAMA_HOST=http://host.docker.internal:11434
+      - AGENT_DATA_DIR=/app/data
+      # Model to use (must be pulled in your Ollama instance: `ollama pull gemma4`).
+      - AGENT_MODEL=gemma4
 
     # Alternatively, use host networking on Linux so the container shares
     # the host network stack and can reach Ollama at localhost:11434 directly.
-    # Uncomment the two lines below and remove the environment block above:
+    # Uncomment the line below and remove the OLLAMA_HOST entry above:
     # network_mode: host
 
 volumes:
-  agent-memory:
-  agent-soul:
+  agent-data:

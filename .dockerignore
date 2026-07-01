@@ -7,11 +7,14 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# Runtime files that should come from volumes, not the image
+# Local persistent state — comes from the mounted volume, not the image.
+# NOTE: soul.md is intentionally NOT ignored: the shipped copy is used to
+# seed the data directory on first run.
+data/
 memory.json
-soul.md
 output.txt
 session_*.json
+conversation.json
 
 # Editors and OS
 .vscode/

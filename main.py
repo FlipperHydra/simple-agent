@@ -3,8 +3,18 @@ import asyncio
 import json
 import os
 import re
+import shutil
 from datetime import datetime
 import ollama
+from config import (
+    SOUL_FILE,
+    MEMORY_FILE,
+    CONVERSATION_FILE,
+    DATA_DIR,
+    data_path,
+    atomic_write,
+    atomic_write_json,
+)
 from tool_registry import ToolRegistry
 from tool_processor import ToolProcessor
 from prompts import (
@@ -15,21 +25,34 @@ from prompts import (
     RESEARCH_PROMPT,
     soul_prompt,
     soul_update_prompt,
+    compaction_prompt,
 )
+
+try:
+    import tiktoken
+    _ENC = tiktoken.get_encoding('cl100k_base')
+except Exception:
+    _ENC = None
 
 _client = ollama.AsyncClient()
 
-SOUL_FILE = 'soul.md'
-MEMORY_FILE = 'memory.json'
+# Model is configurable; gemma4 (https://ollama.com/library/gemma4) is a real,
+# valid Ollama model and remains the default. Override with AGENT_MODEL.
+DEFAULT_MODEL = os.environ.get('AGENT_MODEL', 'gemma4')
 
 # Context window passed to Ollama on every chat call.
 # 16384 tokens gives comfortable room for system prompts (~4k) plus long conversations.
 # Raise to 32768 if your hardware supports it; lower to 8192 to save VRAM.
-NUM_CTX = 16384
+NUM_CTX = int(os.environ.get('AGENT_NUM_CTX', '16384'))
 
-# Maximum number of conversation turns (user + assistant pairs) kept in the
-# rolling window.  System messages are always pinned and never trimmed.
-MAX_TURNS = 40
+# --- Context compaction (replaces the old MAX_TURNS hard-truncation) --------
+# When the conversation exceeds this many tokens we offer to COMPACT (summarize)
+# the oldest half rather than silently dropping messages. Configurable.
+COMPACT_THRESHOLD_TOKENS = int(os.environ.get('AGENT_COMPACT_THRESHOLD', '2000'))
+# After the user accepts or declines a compaction prompt, we do not nag every
+# turn: we only re-prompt once the conversation has grown by more than this
+# many tokens since that last decision.
+COMPACT_REPROMPT_DELTA = int(os.environ.get('AGENT_COMPACT_REPROMPT_DELTA', '250'))
 
 # Keywords that trigger inclusion of RESEARCH_PROMPT in the system messages.
 # When none of these appear in the user message, the ~1080-token prompt is omitted.
@@ -88,6 +111,39 @@ def _load_soul() -> str | None:
         with open(SOUL_FILE, 'r', encoding='utf-8') as f:
             return f.read().strip()
     return None
+
+
+def _backup_and_write_soul(content: str) -> bool:
+    """Write soul.md safely: back up the current file to soul.md.bak first,
+    then write atomically (temp file + os.replace). Returns True on success.
+
+    soul.md is the agent's persisted identity/profile; a truncated or garbage
+    write here silently corrupts it, so every write goes through this path.
+    """
+    try:
+        if os.path.exists(SOUL_FILE):
+            shutil.copy2(SOUL_FILE, SOUL_FILE + '.bak')
+    except OSError as e:
+        print(f'[soul] warning: could not back up soul.md: {e}')
+    try:
+        atomic_write(SOUL_FILE, content)
+        return True
+    except OSError as e:
+        print(f'[soul] error: could not write soul.md: {e}')
+        return False
+
+
+def _seed_default_files() -> None:
+    """Seed the data directory with the repo's shipped soul.md on first run so
+    behaviour matches the pre-data-dir version. Only runs when no soul.md
+    exists yet in the data directory."""
+    repo_soul = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'soul.md')
+    if (not os.path.exists(SOUL_FILE) and os.path.exists(repo_soul)
+            and os.path.abspath(repo_soul) != os.path.abspath(SOUL_FILE)):
+        try:
+            shutil.copy2(repo_soul, SOUL_FILE)
+        except OSError:
+            pass
 
 
 def _load_memory() -> str | None:
@@ -183,9 +239,8 @@ def _write_soul_section(section: str, new_content: str) -> None:
     else:
         updated = soul.rstrip() + f'\n\n## {section}\n{replacement}\n'
 
-    with open(SOUL_FILE, 'w', encoding='utf-8') as f:
-        f.write(updated.strip() + '\n')
-    print(f"[soul] Section '{section}' updated.")
+    if _backup_and_write_soul(updated.strip() + '\n'):
+        print(f"[soul] Section '{section}' updated.")
 
 
 def _remove_soul_section(section: str) -> None:
@@ -204,9 +259,8 @@ def _remove_soul_section(section: str) -> None:
     updated = section_pattern.sub('', soul)
     updated = re.sub(r'\n{3,}', '\n\n', updated)
 
-    with open(SOUL_FILE, 'w', encoding='utf-8') as f:
-        f.write(updated.strip() + '\n')
-    print(f"[soul_remove] Section '{section}' removed from soul.md.")
+    if _backup_and_write_soul(updated.strip() + '\n'):
+        print(f"[soul_remove] Section '{section}' removed from soul.md.")
 
 
 def _needs_research(user_message: str) -> bool:
@@ -230,31 +284,162 @@ def _build_system_messages(registry: ToolRegistry, user_message: str = '') -> li
     return messages
 
 
-def _trim_messages(system_messages: list, conversation: list) -> list:
-    """Return system messages pinned at the front plus the last MAX_TURNS turns.
+# --------------------------------------------------------------------------
+# Conversation persistence
+# --------------------------------------------------------------------------
+def _load_conversation() -> list:
+    """Load the persisted conversation from disk (empty list if none/invalid)."""
+    if os.path.exists(CONVERSATION_FILE):
+        try:
+            with open(CONVERSATION_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+        except (json.JSONDecodeError, OSError):
+            pass
+    return []
 
-    A 'turn' is one user message plus the assistant reply that follows it
-    (and any tool-result messages in between).  We count assistant messages
-    as turn boundaries and keep the most recent MAX_TURNS of them.
+
+def _save_conversation(conversation: list) -> None:
+    """Autosave conversation atomically. Warns (never crashes) on failure."""
+    try:
+        atomic_write_json(CONVERSATION_FILE, conversation)
+    except OSError as e:
+        print(f'[warn] could not save conversation: {e}')
+
+
+# --------------------------------------------------------------------------
+# Token counting + context compaction (replaces MAX_TURNS truncation)
+# --------------------------------------------------------------------------
+def _count_tokens(messages) -> int:
+    """Token count of a message list (or raw string) via tiktoken.
+
+    Falls back to a ~4-chars-per-token heuristic when tiktoken is unavailable.
     """
-    if not conversation:
-        return list(system_messages)
+    if isinstance(messages, str):
+        text = messages
+    else:
+        text = '\n'.join(str(m.get('content', '')) for m in messages)
+    if _ENC:
+        return len(_ENC.encode(text))
+    return max(1, len(text) // 4)
 
-    turn_count = 0
-    cutoff = len(conversation)
-    for i in range(len(conversation) - 1, -1, -1):
-        if conversation[i]['role'] == 'assistant':
-            turn_count += 1
-            if turn_count >= MAX_TURNS:
-                cutoff = i
+
+def _render_conversation(messages: list) -> str:
+    return '\n\n'.join(f"{m['role'].upper()}: {m.get('content', '')}" for m in messages)
+
+
+def _split_for_compaction(conversation: list) -> int | None:
+    """Choose an index splitting conversation into (older, recent).
+
+    Split points are only ever at user-message boundaries so a user/assistant
+    pair is never torn apart. We aim to move roughly the oldest half (by tokens)
+    into the older segment while always keeping at least the most recent
+    complete turn verbatim. Returns None when there is nothing safe to compact
+    (fewer than two turns).
+    """
+    boundaries = [i for i, m in enumerate(conversation) if m['role'] == 'user']
+    if len(boundaries) < 2:
+        return None
+    total = _count_tokens(conversation)
+    half = total / 2
+    # Default: keep only the final turn verbatim, compact everything before it.
+    split = boundaries[-1]
+    for b in boundaries[1:]:  # never split before the first turn
+        if _count_tokens(conversation[:b]) >= half:
+            split = b
+            break
+    return split
+
+
+async def _summarize_segment(client, model: str, segment: list) -> str | None:
+    """Ask the model to compact an older conversation segment. Returns the
+    summary text, or None if the call fails (caller keeps the raw segment)."""
+    prompt = compaction_prompt(_render_conversation(segment))
+    try:
+        resp = await client.chat(
+            model=model,
+            messages=[{'role': 'user', 'content': prompt}],
+            stream=False,
+            options={'num_ctx': NUM_CTX},
+        )
+    except Exception as e:
+        print(f'[compact] summarization failed, keeping messages intact: {e}')
+        return None
+    return (resp.message.content or '').strip()
+
+
+async def _compact_once(client, model: str, conversation: list) -> list:
+    """Perform a single compaction pass. Older segment is replaced by one
+    synthetic system message containing its summary. On failure or when there
+    is nothing to compact, returns the conversation unchanged."""
+    split = _split_for_compaction(conversation)
+    if not split:
+        return conversation
+    older, recent = conversation[:split], conversation[split:]
+    summary = await _summarize_segment(client, model, older)
+    if not summary:
+        return conversation
+    compacted = {
+        'role': 'system',
+        'content': f'[Compacted summary of earlier conversation]: {summary}',
+    }
+    print(f'[compact] Summarized {len(older)} older message(s) into 1 summary.')
+    return [compacted] + recent
+
+
+async def _maybe_compact(
+    client,
+    model: str,
+    conversation: list,
+    tokens_at_last_prompt: int,
+) -> tuple[list, int]:
+    """Offer/perform compaction according to the token budget policy.
+
+    - Hard cap: if tokens exceed the model's context window (NUM_CTX), compact
+      automatically without asking (repeatedly, until safe).
+    - Soft threshold: above COMPACT_THRESHOLD_TOKENS, ask the user Y/N, but only
+      re-ask once growth since the last decision exceeds COMPACT_REPROMPT_DELTA.
+    Returns the (possibly compacted) conversation and the updated
+    tokens-at-last-prompt marker.
+    """
+    total = _count_tokens(conversation)
+
+    # Hard cap -- force compaction, no prompt.
+    if total > NUM_CTX:
+        print(
+            f'[auto-compact] Context reached the model\'s hard limit '
+            f'(NUM_CTX={NUM_CTX}); compacting automatically to prevent corruption.'
+        )
+        while _count_tokens(conversation) > NUM_CTX:
+            new_conv = await _compact_once(client, model, conversation)
+            if new_conv is conversation:  # cannot reduce further
                 break
+            conversation = new_conv
+        _save_conversation(conversation)
+        return conversation, _count_tokens(conversation)
 
-    trimmed = conversation[cutoff:]
-    if len(trimmed) < len(conversation):
-        dropped = len(conversation) - len(trimmed)
-        print(f'[context] Trimmed {dropped} old message(s) to stay within {MAX_TURNS}-turn window.')
+    # Soft threshold -- prompt the user, respecting the re-prompt delta.
+    if total > COMPACT_THRESHOLD_TOKENS and (total - tokens_at_last_prompt) > COMPACT_REPROMPT_DELTA:
+        answer = await asyncio.to_thread(
+            input,
+            'Conversation context exceeding 2000 tokens. In order to preserve '
+            'current context, compact older messages? Y/N ',
+        )
+        if answer.strip().lower() in ('y', 'yes'):
+            conversation = await _compact_once(client, model, conversation)
+            # Keep compacting if still over the soft threshold.
+            while _count_tokens(conversation) > COMPACT_THRESHOLD_TOKENS:
+                new_conv = await _compact_once(client, model, conversation)
+                if new_conv is conversation:
+                    break
+                conversation = new_conv
+            _save_conversation(conversation)
+        # Whether accepted or declined, record the marker so we don't re-prompt
+        # until growth exceeds the delta again.
+        return conversation, _count_tokens(conversation)
 
-    return list(system_messages) + trimmed
+    return conversation, tokens_at_last_prompt
 
 
 async def _stream_response(
@@ -271,34 +456,44 @@ async def _stream_response(
         soul_remover=_remove_soul_section,
     )
 
-    messages = _trim_messages(system_messages, conversation)
+    # Compaction keeps `conversation` within budget, so we send it in full;
+    # system messages are always pinned at the front.
+    messages = list(system_messages) + conversation
 
-    response = await client.chat(
-        model=model,
-        messages=messages,
-        think=True,
-        stream=True,
-        options={'num_ctx': NUM_CTX},
-    )
+    # A single failed chat call must never kill the session (and thus the whole
+    # conversation/context). On error we print and return an empty result so the
+    # REPL loop can continue.
+    try:
+        response = await client.chat(
+            model=model,
+            messages=messages,
+            think=True,
+            stream=True,
+            options={'num_ctx': NUM_CTX},
+        )
 
-    full_response = ''
-    in_thinking = False
+        full_response = ''
+        in_thinking = False
 
-    async for chunk in response:
-        if chunk.message.thinking:
-            if not in_thinking:
-                print('\n-- Thinking --------------------------------------------------\n')
-                in_thinking = True
-            print(chunk.message.thinking, end='', flush=True)
-        elif chunk.message.content:
-            if in_thinking:
-                print('\n\n-- Final Answer -----------------------------------------------\n')
-                in_thinking = False
-            print(chunk.message.content, end='', flush=True)
-            full_response += chunk.message.content
-            tp.feed(chunk)
+        async for chunk in response:
+            if chunk.message.thinking:
+                if not in_thinking:
+                    print('\n-- Thinking --------------------------------------------------\n')
+                    in_thinking = True
+                print(chunk.message.thinking, end='', flush=True)
+            elif chunk.message.content:
+                if in_thinking:
+                    print('\n\n-- Final Answer -----------------------------------------------\n')
+                    in_thinking = False
+                print(chunk.message.content, end='', flush=True)
+                full_response += chunk.message.content
+                tp.feed(chunk)
 
-    await tp.finalize()
+        await tp.finalize()
+    except Exception as e:
+        print(f'\n[error] chat failed: {e}')
+        return '', []
+
     print()
     return full_response, tp.flush_results()
 
@@ -314,39 +509,60 @@ async def _run_soul_update(client, model: str, registry: ToolRegistry) -> None:
     ]
 
     print('\n-- Soul Update ------------------------------------------------\n')
-    response = await client.chat(
-        model=model,
-        messages=update_messages,
-        think=True,
-        stream=True,
-        options={'num_ctx': NUM_CTX},
-    )
+    try:
+        response = await client.chat(
+            model=model,
+            messages=update_messages,
+            think=True,
+            stream=True,
+            options={'num_ctx': NUM_CTX},
+        )
 
-    full = ''
-    in_thinking = False
-    async for chunk in response:
-        if chunk.message.thinking:
-            if not in_thinking:
-                print('Thinking...\n')
-                in_thinking = True
-            print(chunk.message.thinking, end='', flush=True)
-        elif chunk.message.content:
-            if in_thinking:
-                print('\n\n-- Insights + Updated soul.md --------------------------------\n')
-                in_thinking = False
-            print(chunk.message.content, end='', flush=True)
-            full += chunk.message.content
+        full = ''
+        in_thinking = False
+        async for chunk in response:
+            if chunk.message.thinking:
+                if not in_thinking:
+                    print('Thinking...\n')
+                    in_thinking = True
+                print(chunk.message.thinking, end='', flush=True)
+            elif chunk.message.content:
+                if in_thinking:
+                    print('\n\n-- Insights + Updated soul.md --------------------------------\n')
+                    in_thinking = False
+                print(chunk.message.content, end='', flush=True)
+                full += chunk.message.content
+    except Exception as e:
+        print(f'\n[error] chat failed: {e}')
+        print('[soul_update] Aborted -- no changes written.')
+        return
 
     print()
 
-    soul_start = full.find('# ')
-    if soul_start != -1:
-        updated_soul = full[soul_start:].strip()
-        with open(SOUL_FILE, 'w', encoding='utf-8') as f:
-            f.write(updated_soul + '\n')
-        print('\n[soul_update] soul.md updated.')
-    else:
-        print('\n[soul_update] Could not extract updated soul.md -- no changes written.')
+    # Extract the new soul.md ONLY from between the strict sentinels the prompt
+    # requires. The previous implementation grabbed everything after the first
+    # occurrence of the substring '# ' in the model's raw output. That output
+    # includes the model's unfiltered reasoning/commentary, so any stray '# '
+    # earlier in that text (a markdown-style heading in prose, a '#' code
+    # comment being discussed, etc.) caused the WRONG slice to be written to
+    # soul.md -- silently overwriting the persisted identity/profile with
+    # garbage, with no backup and no validation. We now require BOTH
+    # ===SOUL START===/===SOUL END=== sentinels, write only what is between
+    # them, back up the previous soul.md, and write atomically.
+    start_tag, end_tag = '===SOUL START===', '===SOUL END==='
+    start = full.find(start_tag)
+    end = full.find(end_tag, start + len(start_tag)) if start != -1 else -1
+    if start == -1 or end == -1:
+        print('\n[soul_update] Sentinels not found in output -- no changes written.')
+        return
+
+    updated_soul = full[start + len(start_tag):end].strip()
+    if not updated_soul.startswith('#'):
+        print('\n[soul_update] Extracted content is not a valid soul document -- no changes written.')
+        return
+
+    if _backup_and_write_soul(updated_soul + '\n'):
+        print('\n[soul_update] soul.md updated (previous version saved to soul.md.bak).')
 
 
 def _print_help(registry: ToolRegistry) -> None:
@@ -371,23 +587,66 @@ def _print_help(registry: ToolRegistry) -> None:
     print('  propose_soul_edit(section, proposed_content)')
     print('  propose_soul_remove(section)')
     print(f'\n-- Context Settings ----------------------------------------')
-    print(f'  NUM_CTX   = {NUM_CTX} tokens')
-    print(f'  MAX_TURNS = {MAX_TURNS} turns')
+    print(f'  NUM_CTX                  = {NUM_CTX} tokens (model hard limit)')
+    print(f'  COMPACT_THRESHOLD_TOKENS = {COMPACT_THRESHOLD_TOKENS} tokens (offer to compact)')
+    print(f'  COMPACT_REPROMPT_DELTA   = {COMPACT_REPROMPT_DELTA} tokens')
+    print(f'  DATA_DIR                 = {DATA_DIR}')
     print()
+
+
+async def _validate_model(client, model: str) -> bool:
+    """Fail fast if the configured model is not pulled locally, instead of
+    crashing deep inside the first chat call."""
+    try:
+        resp = await client.list()
+    except Exception as e:
+        print(f'[startup] Could not reach Ollama to list models: {e}')
+        print('[startup] Is the Ollama server running? Try:  ollama serve')
+        return False
+
+    names = []
+    for m in (getattr(resp, 'models', None) or []):
+        name = getattr(m, 'model', None)
+        if name is None and isinstance(m, dict):
+            name = m.get('model') or m.get('name')
+        if name:
+            names.append(name)
+
+    base = model.split(':')[0]
+    if any(n == model or n.split(':')[0] == base for n in names):
+        return True
+
+    print(f"[startup] Model '{model}' is not available locally.")
+    print(f'[startup] Pull it first with:  ollama pull {model}')
+    print(f"[startup] Models found: {', '.join(names) if names else '(none)'}")
+    return False
 
 
 async def main() -> None:
     registry = ToolRegistry()
-    current_model = 'gemma4'
+    current_model = DEFAULT_MODEL
+
+    # Seed the data dir and validate the model before entering the REPL.
+    _seed_default_files()
+    if not await _validate_model(_client, current_model):
+        return
 
     system_messages = _build_system_messages(registry)
-    conversation: list = []
+    # Autoload persisted conversation so context survives restarts.
+    conversation: list = _load_conversation()
+    tokens_at_last_prompt = _count_tokens(conversation)
 
     print('Agent ready.')
+    if conversation:
+        print(f'[context] Restored {len(conversation)} message(s) from {CONVERSATION_FILE}')
     print('Type /? for help.')
 
     while True:
-        user_message = input('\nYou: ').strip()
+        try:
+            user_message = input('\nYou: ').strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
 
         if not user_message:
             continue
@@ -402,6 +661,8 @@ async def main() -> None:
         if user_message == '/clear':
             system_messages = _build_system_messages(registry)
             conversation = []
+            tokens_at_last_prompt = 0
+            _save_conversation(conversation)
             print('[History cleared]')
             continue
 
@@ -435,19 +696,20 @@ async def main() -> None:
         if user_message == '/soul_reset':
             answer = input('[soul_reset] Restore soul.md to default content? [y/N]: ')
             if answer.strip().lower() in ('y', 'yes'):
-                with open(SOUL_FILE, 'w', encoding='utf-8') as f:
-                    f.write(SOUL_DEFAULT)
-                print('[soul_reset] soul.md restored to default.')
+                if _backup_and_write_soul(SOUL_DEFAULT):
+                    print('[soul_reset] soul.md restored to default.')
             else:
                 print('[soul_reset] Cancelled.')
             continue
 
         if user_message == '/save_session':
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'session_{timestamp}.json'
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(conversation, f, indent=2, ensure_ascii=False)
-            print(f'[save_session] Saved {len(conversation)} messages to {filename}')
+            filepath = data_path(f'session_{timestamp}.json')
+            try:
+                atomic_write_json(filepath, conversation)
+                print(f'[save_session] Saved {len(conversation)} messages to {filepath}')
+            except OSError as e:
+                print(f'[save_session] Error: {e}')
             continue
 
         if user_message.startswith('/load_session'):
@@ -456,10 +718,15 @@ async def main() -> None:
                 print('[load_session] Usage: /load_session <filename>')
                 continue
             filepath = parts[1].strip()
+            # Accept a bare filename saved in the data dir as well as a path.
+            if not os.path.exists(filepath) and os.path.exists(data_path(filepath)):
+                filepath = data_path(filepath)
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
                 conversation = loaded
+                tokens_at_last_prompt = _count_tokens(conversation)
+                _save_conversation(conversation)
                 print(f'[load_session] Loaded {len(loaded)} messages from {filepath}')
             except FileNotFoundError:
                 print(f'[load_session] File not found: {filepath}')
@@ -480,26 +747,42 @@ async def main() -> None:
             await _run_soul_update(_client, current_model, registry)
             continue
 
-        system_messages = _build_system_messages(registry, user_message)
+        # Any unexpected failure in a single turn must not tear down the REPL
+        # (which would drop the in-memory conversation). Catch, report, continue.
+        try:
+            system_messages = _build_system_messages(registry, user_message)
 
-        conversation.append({'role': 'user', 'content': user_message})
+            conversation.append({'role': 'user', 'content': user_message})
 
-        full_response, tool_results = await _stream_response(
-            _client, current_model, system_messages, conversation, registry
-        )
-        conversation.append({'role': 'assistant', 'content': full_response})
-
-        for tr in tool_results:
-            conversation.append({
-                'role': 'assistant',
-                'content': f"I ran {tr['tool']} and got:\n{tr['result']}"
-            })
-
-        if tool_results:
-            followup_response, _ = await _stream_response(
+            full_response, tool_results = await _stream_response(
                 _client, current_model, system_messages, conversation, registry
             )
-            conversation.append({'role': 'assistant', 'content': followup_response})
+            conversation.append({'role': 'assistant', 'content': full_response})
+
+            # Tool outputs are external observations, not the model's own words,
+            # so they use role 'tool' (previously mislabeled 'assistant').
+            for tr in tool_results:
+                conversation.append({
+                    'role': 'tool',
+                    'content': f"I ran {tr['tool']} and got:\n{tr['result']}"
+                })
+
+            if tool_results:
+                followup_response, _ = await _stream_response(
+                    _client, current_model, system_messages, conversation, registry
+                )
+                conversation.append({'role': 'assistant', 'content': followup_response})
+
+            # Token-budgeted compaction (offer, or auto at the hard cap), then
+            # autosave so context survives restarts.
+            conversation, tokens_at_last_prompt = await _maybe_compact(
+                _client, current_model, conversation, tokens_at_last_prompt
+            )
+            _save_conversation(conversation)
+        except Exception as e:
+            print(f'[error] turn failed: {e}')
+            _save_conversation(conversation)
+            continue
 
     print('\n[Session complete]')
 

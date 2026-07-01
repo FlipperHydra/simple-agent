@@ -14,7 +14,7 @@ except Exception:
     _ENC = None
 
 MEMORY_FILE = 'memory.json'
-_CHUNK_TOKENS = 200
+_CHUNK_TOKENS = 1024
 
 _SUMMARIZE_CHUNK_PROMPT = (
     "Accurately summarize this chunk. Update the anchor notes list with any new "
@@ -333,9 +333,6 @@ class Tools:
         if chunk_index < 0 or chunk_index >= total:
             return f'[summarize_file_chunk] chunk_index {chunk_index} out of range (0-{total - 1}).'
 
-        chunk_text = session['chunks'][chunk_index]
-
-        # Extract and update anchor notes from the summary
         lower = chunk_summary.lower()
         if 'anchor notes' in lower:
             split = lower.find('anchor notes')
@@ -372,7 +369,6 @@ class Tools:
         mini_summaries = session['mini_summaries']
         anchor_notes = session['anchor_notes']
 
-        # Clean up session
         del _summarize_sessions[filename]
         print(f'\n[summarize_file_finalize] Synthesizing {len(mini_summaries)} chunk(s) for "{filename}"')
 

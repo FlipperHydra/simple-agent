@@ -24,6 +24,18 @@ def _make_save_tool() -> Callable:
     return save_tool
 
 
+def _make_overwrite_file() -> Callable:
+    async def overwrite_file(filename: str, content: str) -> str:
+        return Tools.overwrite_file(filename, content)
+    return overwrite_file
+
+
+def _make_get_datetime() -> Callable:
+    async def get_datetime() -> str:
+        return Tools.get_datetime()
+    return get_datetime
+
+
 def _make_read_file() -> Callable:
     async def read_file(filename: str) -> str:
         return Tools.read_file(filename)
@@ -60,6 +72,18 @@ def _make_make_directory() -> Callable:
     return make_directory
 
 
+def _make_copy_file() -> Callable:
+    async def copy_file(src: str, dest: str) -> str:
+        return Tools.copy_file(src, dest)
+    return copy_file
+
+
+def _make_move_file() -> Callable:
+    async def move_file(src: str, dest: str) -> str:
+        return Tools.move_file(src, dest)
+    return move_file
+
+
 def _make_append_memory() -> Callable:
     async def append_memory(note: str) -> str:
         return Tools.append_memory(note)
@@ -70,6 +94,42 @@ def _make_recall_memory() -> Callable:
     async def recall_memory() -> str:
         return Tools.recall_memory()
     return recall_memory
+
+
+def _make_clear_memory() -> Callable:
+    async def clear_memory() -> str:
+        return Tools.clear_memory()
+    return clear_memory
+
+
+def _make_write_json() -> Callable:
+    async def write_json(filename: str, key: str, value: str) -> str:
+        return Tools.write_json(filename, key, value)
+    return write_json
+
+
+def _make_read_json() -> Callable:
+    async def read_json(filename: str, key: str = '') -> str:
+        return Tools.read_json(filename, key)
+    return read_json
+
+
+def _make_eval_math() -> Callable:
+    async def eval_math(expression: str) -> str:
+        return Tools.eval_math(expression)
+    return eval_math
+
+
+def _make_summarize_file() -> Callable:
+    async def summarize_file(filename: str) -> str:
+        return Tools.summarize_file(filename)
+    return summarize_file
+
+
+def _make_zip_files() -> Callable:
+    async def zip_files(filenames_csv: str, output_zip: str) -> str:
+        return Tools.zip_files(filenames_csv, output_zip)
+    return zip_files
 
 
 def _make_propose_soul_edit() -> Callable:
@@ -95,6 +155,18 @@ class ToolRegistry:
             _make_save_tool(),
             arg_names=['filename', 'content'],
             description='appends content to a named file',
+        )
+        self.register_tool(
+            'overwrite_file',
+            _make_overwrite_file(),
+            arg_names=['filename', 'content'],
+            description='replaces the entire contents of a file with new content',
+        )
+        self.register_tool(
+            'get_datetime',
+            _make_get_datetime(),
+            arg_names=[],
+            description='returns the current date and time as a formatted string',
         )
         self.register_tool(
             'read_file',
@@ -134,16 +206,66 @@ class ToolRegistry:
             description='creates a directory and any missing parent directories',
         )
         self.register_tool(
+            'copy_file',
+            _make_copy_file(),
+            arg_names=['src', 'dest'],
+            description='copies a file from src to dest, leaving the original intact',
+        )
+        self.register_tool(
+            'move_file',
+            _make_move_file(),
+            arg_names=['src', 'dest'],
+            description='moves or renames a file from src to dest [DANGEROUS]',
+            dangerous=True,
+        )
+        self.register_tool(
             'append_memory',
             _make_append_memory(),
             arg_names=['note'],
-            description='appends a timestamped note to memory.md for persistent recall',
+            description='appends a timestamped note to memory.json log for persistent recall',
         )
         self.register_tool(
             'recall_memory',
             _make_recall_memory(),
             arg_names=[],
-            description='reads and returns all notes stored in memory.md',
+            description='reads and returns all facts and log entries from memory.json',
+        )
+        self.register_tool(
+            'clear_memory',
+            _make_clear_memory(),
+            arg_names=[],
+            description='wipes all entries from memory.json [DANGEROUS]',
+            dangerous=True,
+        )
+        self.register_tool(
+            'write_json',
+            _make_write_json(),
+            arg_names=['filename', 'key', 'value'],
+            description='upserts a key-value pair into a JSON file',
+        )
+        self.register_tool(
+            'read_json',
+            _make_read_json(),
+            arg_names=['filename', 'key'],
+            description='reads a key from a JSON file, or returns the full file if key is omitted',
+        )
+        self.register_tool(
+            'eval_math',
+            _make_eval_math(),
+            arg_names=['expression'],
+            description='safely evaluates a math expression using AST whitelist (no arbitrary code)',
+        )
+        self.register_tool(
+            'summarize_file',
+            _make_summarize_file(),
+            arg_names=['filename'],
+            description='reads a file, chunks it by token count, and returns a summarization prompt with anchor notes for the agent to process iteratively',
+        )
+        self.register_tool(
+            'zip_files',
+            _make_zip_files(),
+            arg_names=['filenames_csv', 'output_zip'],
+            description='compresses a comma-separated list of files into a zip archive',
         )
         self.register_tool(
             'propose_soul_edit',

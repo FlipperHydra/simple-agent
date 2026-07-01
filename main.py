@@ -20,7 +20,7 @@ from prompts import (
 _client = ollama.AsyncClient()
 
 SOUL_FILE = 'soul.md'
-MEMORY_FILE = 'memory.md'
+MEMORY_FILE = 'memory.json'
 
 # Context window passed to Ollama on every chat call.
 # 16384 tokens gives comfortable room for system prompts (~4k) plus long conversations.
@@ -92,9 +92,24 @@ def _load_soul() -> str | None:
 
 def _load_memory() -> str | None:
     if os.path.exists(MEMORY_FILE):
-        with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-        return content if content else None
+        try:
+            with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            lines = []
+            facts = data.get('facts', {})
+            log = data.get('log', [])
+            if facts:
+                lines.append('--- Facts ---')
+                for k, v in facts.items():
+                    lines.append(f'  {k}: {v}')
+            if log:
+                lines.append('--- Log ---')
+                for entry in log:
+                    lines.append(f"  [{entry['timestamp']}] {entry['note']}")
+            content = '\n'.join(lines)
+            return content if content else None
+        except (json.JSONDecodeError, IOError):
+            return None
     return None
 
 
@@ -225,7 +240,6 @@ def _trim_messages(system_messages: list, conversation: list) -> list:
     if not conversation:
         return list(system_messages)
 
-    # Walk backwards and collect up to MAX_TURNS assistant messages worth of history.
     turn_count = 0
     cutoff = len(conversation)
     for i in range(len(conversation) - 1, -1, -1):
@@ -291,7 +305,7 @@ async def _stream_response(
 
 async def _run_soul_update(client, model: str, registry: ToolRegistry) -> None:
     soul_content = _load_soul() or '(soul.md not found)'
-    memory_content = _load_memory() or '(memory.md is empty)'
+    memory_content = _load_memory() or '(memory.json is empty)'
 
     prompt = soul_update_prompt(memory_content, soul_content)
     update_messages = [
@@ -366,7 +380,6 @@ async def main() -> None:
     registry = ToolRegistry()
     current_model = 'gemma4'
 
-    # conversation holds only non-system messages; system_messages are rebuilt per-turn
     system_messages = _build_system_messages(registry)
     conversation: list = []
 
@@ -467,7 +480,6 @@ async def main() -> None:
             await _run_soul_update(_client, current_model, registry)
             continue
 
-        # Rebuild system messages for this turn (injects RESEARCH_PROMPT only if needed)
         system_messages = _build_system_messages(registry, user_message)
 
         conversation.append({'role': 'user', 'content': user_message})
@@ -479,8 +491,8 @@ async def main() -> None:
 
         for tr in tool_results:
             conversation.append({
-                'role': 'user',
-                'content': f"[Tool result: {tr['tool']}]\n{tr['result']}"
+                'role': 'assistant',
+                'content': f"I ran {tr['tool']} and got:\n{tr['result']}"
             })
 
         if tool_results:

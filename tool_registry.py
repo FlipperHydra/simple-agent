@@ -19,8 +19,7 @@ def _make_write_tool() -> Callable:
 
 def _make_save_tool() -> Callable:
     async def save_tool(filename: str, content: str) -> str:
-        Tools.save_tool(filename, content)
-        return f'saved to {filename}'
+        return Tools.save_tool(filename, content)
     return save_tool
 
 
@@ -124,6 +123,18 @@ def _make_summarize_file() -> Callable:
     async def summarize_file(filename: str) -> str:
         return Tools.summarize_file(filename)
     return summarize_file
+
+
+def _make_summarize_file_chunk() -> Callable:
+    async def summarize_file_chunk(filename: str, chunk_index: str, chunk_summary: str) -> str:
+        return Tools.summarize_file_chunk(filename, int(chunk_index), chunk_summary)
+    return summarize_file_chunk
+
+
+def _make_summarize_file_finalize() -> Callable:
+    async def summarize_file_finalize(filename: str) -> str:
+        return Tools.summarize_file_finalize(filename)
+    return summarize_file_finalize
 
 
 def _make_zip_files() -> Callable:
@@ -259,7 +270,19 @@ class ToolRegistry:
             'summarize_file',
             _make_summarize_file(),
             arg_names=['filename'],
-            description='reads a file, chunks it by token count, and returns a summarization prompt with anchor notes for the agent to process iteratively',
+            description='init: reads file, calculates chunks, returns dispatch instructions for iterative summarization',
+        )
+        self.register_tool(
+            'summarize_file_chunk',
+            _make_summarize_file_chunk(),
+            arg_names=['filename', 'chunk_index', 'chunk_summary'],
+            description='per-chunk step: stores agent summary and anchor notes for one chunk; returns next chunk content',
+        )
+        self.register_tool(
+            'summarize_file_finalize',
+            _make_summarize_file_finalize(),
+            arg_names=['filename'],
+            description='final step: synthesizes all chunk summaries and anchor notes into a complete file summary',
         )
         self.register_tool(
             'zip_files',

@@ -16,17 +16,22 @@ except Exception:
 MEMORY_FILE = 'memory.json'
 _CHUNK_TOKENS = 200
 
-_SUMMARIZE_SYSTEM = (
+_SUMMARIZE_CHUNK_PROMPT = (
     "Accurately summarize this chunk. Update the anchor notes list with any new "
     "function names, variable names, data structures, key decisions, or facts needed "
     "to reconstruct intent. Anchor notes are lossless checkpoints — never drop a "
-    "previous note, only add. Output: chunk summary, then full updated anchor notes list."
+    "previous note, only add. Output format:\n"
+    "CHUNK SUMMARY: <summary>\n"
+    "ANCHOR NOTES:\n<updated full list>"
 )
 
-_SUMMARIZE_FINAL = (
-    "Using the mini-summaries and anchor notes below, produce a single tight technical "
-    "summary of the full file followed by the complete anchor notes list. "
-    "No paraphrasing of technical terms. No filler. Accuracy over readability."
+_SUMMARIZE_FINAL_PROMPT = (
+    "Using the chunk summaries and anchor notes in this conversation, produce a single "
+    "tight technical summary of the full file followed by the complete anchor notes list. "
+    "No paraphrasing of technical terms. No filler. Accuracy over readability.\n"
+    "Output format:\n"
+    "FINAL SUMMARY: <summary>\n"
+    "ANCHOR NOTES:\n<complete list>"
 )
 
 
@@ -65,6 +70,10 @@ def _chunk_text(text: str, chunk_size: int = _CHUNK_TOKENS) -> list[str]:
     return chunks
 
 
+# In-memory store for active summarization sessions keyed by filename
+_summarize_sessions: dict[str, dict] = {}
+
+
 class Tools:
     """
     All agent tool implementations as static methods.
@@ -86,10 +95,11 @@ class Tools:
         print(f'\n[write_tool] Wrote -> {formatted}')
 
     @staticmethod
-    def save_tool(filename: str, content: str) -> None:
+    def save_tool(filename: str, content: str) -> str:
         with open(filename, 'a', encoding='utf-8') as f:
             f.write(content + '\n')
         print(f'\n[save_tool] Saved -> {filename}')
+        return f'saved to {filename}'
 
     @staticmethod
     def overwrite_file(filename: str, content: str) -> str:
@@ -274,13 +284,10 @@ class Tools:
             return f'[eval_math] Error: {e}'
 
     @staticmethod
-    def summarize_file(filename: str, llm_caller=None) -> str:
+    def summarize_file(filename: str) -> str:
         """
-        Reads a file, chunks it by token count, and iteratively summarizes
-        with carry-forward anchor notes. llm_caller must be a sync callable
-        that takes a prompt string and returns a string response.
-        If llm_caller is None, returns the raw chunked content with the
-        summarization prompt prepended for the agent to handle inline.
+        Init step: reads the file, calculates chunks, stores session,
+        and instructs the agent to call summarize_file_chunk for each index.
         """
         try:
             with open(filename, 'r', encoding='utf-8') as f:
@@ -291,42 +298,89 @@ class Tools:
             return f'[summarize_file] Error reading file: {e}'
 
         chunks = _chunk_text(content)
+        total = len(chunks)
+        token_count = len(_tokenize(content))
 
-        if llm_caller is None:
-            # Inline mode: return prompt + full content for the agent loop to handle
+        _summarize_sessions[filename] = {
+            'chunks': chunks,
+            'total': total,
+            'mini_summaries': [],
+            'anchor_notes': '',
+        }
+
+        print(f'\n[summarize_file] {filename}: {token_count} tokens, {total} chunk(s)')
+        return (
+            f'[summarize_file] Session ready for "{filename}": {total} chunk(s), '
+            f'{token_count} total tokens.\n'
+            f'Call summarize_file_chunk("{filename}", chunk_index) for each index 0 to {total - 1} in order.\n'
+            f'When all chunks are processed, call summarize_file_finalize("{filename}") to synthesize the final summary.\n'
+            f'Chunk prompt to use for each call:\n{_SUMMARIZE_CHUNK_PROMPT}'
+        )
+
+    @staticmethod
+    def summarize_file_chunk(filename: str, chunk_index: int, chunk_summary: str) -> str:
+        """
+        Per-chunk step: stores the agent-provided summary and updated anchor notes
+        for this chunk index. The agent calls this after processing each chunk.
+        chunk_summary should contain the agent output for this chunk including
+        the updated anchor notes section.
+        """
+        session = _summarize_sessions.get(filename)
+        if not session:
+            return f'[summarize_file_chunk] No active session for "{filename}". Call summarize_file first.'
+
+        total = session['total']
+        if chunk_index < 0 or chunk_index >= total:
+            return f'[summarize_file_chunk] chunk_index {chunk_index} out of range (0-{total - 1}).'
+
+        chunk_text = session['chunks'][chunk_index]
+
+        # Extract and update anchor notes from the summary
+        lower = chunk_summary.lower()
+        if 'anchor notes' in lower:
+            split = lower.find('anchor notes')
+            session['anchor_notes'] = chunk_summary[split:].strip()
+
+        session['mini_summaries'].append(f'[Chunk {chunk_index}]\n{chunk_summary}')
+
+        remaining = total - len(session['mini_summaries'])
+        print(f'\n[summarize_file_chunk] Stored chunk {chunk_index}/{total - 1} for "{filename}"')
+
+        if remaining > 0:
+            next_chunk = session['chunks'][chunk_index + 1] if chunk_index + 1 < total else ''
             return (
-                f"{_SUMMARIZE_SYSTEM}\n\n"
-                f"[File: {filename} | {len(chunks)} chunk(s) | "
-                f"{len(_tokenize(content))} tokens]\n\n"
-                + content
+                f'[summarize_file_chunk] Chunk {chunk_index} stored. {remaining} chunk(s) remaining.\n'
+                f'Next chunk ({chunk_index + 1} of {total - 1}):\n---\n{next_chunk}\n---\n'
+                f'Current anchor notes:\n{session["anchor_notes"]}'
+            )
+        else:
+            return (
+                f'[summarize_file_chunk] All {total} chunks processed. '
+                f'Call summarize_file_finalize("{filename}") to synthesize.'
             )
 
-        # Iterative mode: process each chunk with carry-forward anchor notes
-        anchor_notes = ''
-        mini_summaries = []
+    @staticmethod
+    def summarize_file_finalize(filename: str) -> str:
+        """
+        Final step: returns all mini-summaries and accumulated anchor notes
+        with the synthesis prompt, instructing the agent to produce the final output.
+        """
+        session = _summarize_sessions.get(filename)
+        if not session:
+            return f'[summarize_file_finalize] No active session for "{filename}". Call summarize_file first.'
 
-        for i, chunk in enumerate(chunks):
-            prompt = (
-                f"{_SUMMARIZE_SYSTEM}\n\n"
-                f"Chunk {i + 1} of {len(chunks)}:\n"
-                f"{('Anchor notes so far:\n' + anchor_notes + chr(10)) if anchor_notes else ''}"
-                f"---\n{chunk}\n---"
-            )
-            result = llm_caller(prompt)
-            mini_summaries.append(result)
+        mini_summaries = session['mini_summaries']
+        anchor_notes = session['anchor_notes']
 
-            # Extract updated anchor notes from the result
-            if 'anchor notes' in result.lower():
-                split = result.lower().find('anchor notes')
-                anchor_notes = result[split:].strip()
+        # Clean up session
+        del _summarize_sessions[filename]
+        print(f'\n[summarize_file_finalize] Synthesizing {len(mini_summaries)} chunk(s) for "{filename}"')
 
-        # Final synthesis pass
-        synthesis_prompt = (
-            f"{_SUMMARIZE_FINAL}\n\n"
-            + '\n\n'.join(f'[Chunk {i+1}]\n{s}' for i, s in enumerate(mini_summaries))
+        return (
+            f'{_SUMMARIZE_FINAL_PROMPT}\n\n'
+            + '\n\n'.join(mini_summaries)
             + f'\n\nFull anchor notes:\n{anchor_notes}'
         )
-        return llm_caller(synthesis_prompt)
 
     @staticmethod
     def zip_files(filenames_csv: str, output_zip: str) -> str:

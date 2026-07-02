@@ -23,7 +23,7 @@ _CHUNK_TOKENS = 1024
 _SUMMARIZE_CHUNK_PROMPT = (
     "Accurately summarize this chunk. Update the anchor notes list with any new "
     "function names, variable names, data structures, key decisions, or facts needed "
-    "to reconstruct intent. Anchor notes are lossless checkpoints — never drop a "
+    "to reconstruct intent. Anchor notes are lossless checkpoints -- never drop a "
     "previous note, only add. Output format:\n"
     "CHUNK SUMMARY: <summary>\n"
     "ANCHOR NOTES:\n<updated full list>"

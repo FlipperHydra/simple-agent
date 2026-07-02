@@ -173,6 +173,21 @@ YOUR TASK:
 6. Use ASCII only. No bullets or dashes -- use letter prefixes for lists.
 7. Keep the User Profile section factual and grounded in memory only.
    Do not speculate or invent traits not evidenced in memory.md.
+
+OUTPUT DELIMITERS (REQUIRED):
+You may write your insights as free text FIRST. Then output the complete,
+updated soul.md wrapped EXACTLY between these two sentinel lines, each on
+its own line and nowhere else in your response:
+
+===SOUL START===
+# Soul
+...the full updated soul.md document...
+===SOUL END===
+
+The text between the sentinels is written verbatim to soul.md. Do not put
+any commentary, code fences, or extra headings between the sentinels -- only
+the soul.md content itself. If you cannot produce a valid document, omit the
+sentinels entirely and no file will be written.
 """
 
 
@@ -206,6 +221,38 @@ def soul_remove_proposal_display(section: str, existing_content: str = '') -> st
         f'------------------------------------------------------------\n'
         f'Remove this section entirely? [y/N]: '
     )
+
+
+def compaction_prompt(older_conversation_text: str) -> str:
+    """Prompt that compacts older conversation turns into a dense summary.
+
+    Modeled on the file-summarization style used elsewhere: accuracy over
+    readability, preserve concrete anchors (names, decisions, code/state
+    references, open threads) so the summary is a lossless-enough stand-in
+    for the raw turns it replaces.
+    """
+    return f"""\
+You are compacting the EARLIER portion of an ongoing conversation so it fits
+in a smaller context window without losing meaning. Produce a single dense,
+factual summary of the messages below.
+
+REQUIREMENTS
+A. Preserve every concrete anchor: proper names, file names, function and
+   variable names, numbers, decisions made, and any code or state references.
+B. Preserve open threads: unresolved questions, TODOs, and things the user
+   asked for but has not yet received.
+C. Preserve user preferences and instructions expressed anywhere below.
+D. Do not invent or infer facts not present in the text. Accuracy over
+   readability. No filler, no pleasantries.
+E. Write plain prose and/or letter-prefixed lists. This summary REPLACES the
+   raw turns, so anything you omit is lost.
+
+CONVERSATION TO COMPACT
+-----------------------
+{older_conversation_text}
+
+Output only the summary text. Do not add a preamble or sign-off.
+"""
 
 
 MEMORY_PROMPT = """\

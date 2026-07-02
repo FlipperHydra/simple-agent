@@ -1,11 +1,16 @@
 import ast
+import ipaddress
 import json
 import os
 import shutil
+import socket
 import urllib.request
 import zipfile
 from datetime import datetime
+from urllib.parse import urlparse
 from ddgs import DDGS
+
+from config import MEMORY_FILE, OUTPUT_FILE, atomic_write, atomic_write_json
 
 try:
     import tiktoken
@@ -13,7 +18,6 @@ try:
 except Exception:
     _ENC = None
 
-MEMORY_FILE = 'memory.json'
 _CHUNK_TOKENS = 1024
 
 _SUMMARIZE_CHUNK_PROMPT = (
@@ -45,9 +49,14 @@ def _load_memory() -> dict:
     return {'log': [], 'facts': {}}
 
 
-def _save_memory(data: dict) -> None:
-    with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+def _save_memory(data: dict) -> str | None:
+    """Persist memory atomically. Returns an error string on failure instead
+    of raising, so a failed write can never crash the current turn."""
+    try:
+        atomic_write_json(MEMORY_FILE, data)
+        return None
+    except OSError as e:
+        return f'[memory] save failed: {e}'
 
 
 def _tokenize(text: str) -> list:
@@ -70,6 +79,30 @@ def _chunk_text(text: str, chunk_size: int = _CHUNK_TOKENS) -> list[str]:
     return chunks
 
 
+def _is_blocked_host(hostname: str) -> bool:
+    """Return True if hostname resolves to any non-public address.
+
+    Resolves the host and inspects every returned IP; if resolution fails or
+    any address is private/loopback/link-local/reserved/multicast/unspecified
+    the request is blocked. This defends against SSRF to internal services
+    (e.g. cloud metadata at 169.254.169.254) and local-file exfiltration.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return True
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return True
+        if (addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            return True
+    return False
+
+
 # In-memory store for active summarization sessions keyed by filename
 _summarize_sessions: dict[str, dict] = {}
 
@@ -88,9 +121,9 @@ class Tools:
             text
             .replace('\\n', '\n')
             .replace('\\t', '\t')
-            .replace("\\'\', "'")
+            .replace("\\'", "'")
         )
-        with open('output.txt', 'a', encoding='utf-8') as f:
+        with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
             f.write(formatted + '\n')
         print(f'\n[write_tool] Wrote -> {formatted}')
 
@@ -135,6 +168,20 @@ class Tools:
 
     @staticmethod
     def fetch_url(url: str) -> str:
+        # SSRF / local-file-read guard: only http(s), and never resolve to a
+        # private, loopback, or link-local address (blocks file://, ftp://,
+        # 127.0.0.0/8, 10/8, 172.16/12, 192.168/16, 169.254/16, ::1, etc.).
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return '[fetch_url] Blocked: only http and https URLs are allowed.'
+        host = parsed.hostname
+        if not host:
+            return '[fetch_url] Blocked: URL has no host.'
+        if _is_blocked_host(host):
+            return (
+                '[fetch_url] Blocked: refusing to fetch a private, loopback, '
+                'link-local, or otherwise non-public address.'
+            )
         try:
             req = urllib.request.Request(
                 url,
@@ -206,7 +253,9 @@ class Tools:
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
         entry = {'timestamp': timestamp, 'note': note}
         data['log'].append(entry)
-        _save_memory(data)
+        err = _save_memory(data)
+        if err:
+            return err
         print(f'\n[append_memory] Stored -> {entry}')
         return f'[append_memory] Stored note at {timestamp}'
 
@@ -230,7 +279,9 @@ class Tools:
 
     @staticmethod
     def clear_memory() -> str:
-        _save_memory({'log': [], 'facts': {}})
+        err = _save_memory({'log': [], 'facts': {}})
+        if err:
+            return err
         print('\n[clear_memory] memory.json cleared.')
         return '[clear_memory] Memory cleared.'
 
@@ -243,8 +294,7 @@ class Tools:
             else:
                 data = {}
             data[key] = value
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(filename, data)
             print(f'\n[write_json] {filename}[{key}] = {value}')
             return f'[write_json] Set {key} in {filename}'
         except Exception as e:
@@ -265,6 +315,11 @@ class Tools:
         except Exception as e:
             return f'[read_json] Error: {e}'
 
+    # Exponents above this are refused: a**b with a large b can allocate a
+    # gigantic integer (e.g. 9**9**9) and hang the process / exhaust memory.
+    # 1000 comfortably covers legitimate math while blocking the DoS case.
+    _MAX_POW_EXPONENT = 1000
+
     @staticmethod
     def eval_math(expression: str) -> str:
         _ALLOWED_NODES = (
@@ -277,6 +332,26 @@ class Tools:
             for node in ast.walk(tree):
                 if not isinstance(node, _ALLOWED_NODES):
                     return f'[eval_math] Disallowed expression: {type(node).__name__}'
+                # Guard exponentiation before evaluating so we never actually
+                # compute an unsafe power. A constant exponent must be within
+                # the bound; a *computed* exponent (e.g. 9**9**9, where the
+                # exponent is itself an expression) is refused outright because
+                # its magnitude cannot be cheaply bounded ahead of time.
+                if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+                    exp = node.right
+                    if isinstance(exp, ast.Constant) and isinstance(exp.value, (int, float)):
+                        if abs(exp.value) > Tools._MAX_POW_EXPONENT:
+                            return (
+                                '[eval_math] Exponent too large to compute safely '
+                                f'(limit is {Tools._MAX_POW_EXPONENT}); please use a '
+                                'smaller exponent or approximate with floating point.'
+                            )
+                    else:
+                        return (
+                            '[eval_math] Exponent too large or complex to compute '
+                            'safely; please use a small constant exponent or '
+                            'approximate with floating point.'
+                        )
             result = eval(compile(tree, '<string>', 'eval'))  # noqa: S307
             print(f'\n[eval_math] {expression} = {result}')
             return str(result)

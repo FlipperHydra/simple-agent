@@ -97,8 +97,7 @@ class ToolProcessor:
     async def _confirm_dangerous(self, tool_name: str, args: List[str]) -> bool:
         args_preview = ', '.join(f'"{a[:40]}"' for a in args) if args else ''
         prompt = f'\n[!] DANGEROUS: {tool_name}({args_preview}) -- confirm? [y/N]: '
-        loop = asyncio.get_event_loop()
-        answer = await loop.run_in_executor(None, input, prompt)
+        answer = await asyncio.to_thread(input, prompt)
         return answer.strip().lower() in ('y', 'yes')
 
     async def _handle_soul_edit_proposal(self, section: str, proposed_content: str) -> None:
@@ -106,9 +105,8 @@ class ToolProcessor:
         if self._soul_reader is not None:
             existing = self._soul_reader(section)
 
-        loop = asyncio.get_event_loop()
         prompt = soul_edit_proposal_display(section, proposed_content, existing)
-        answer = await loop.run_in_executor(None, input, prompt)
+        answer = await asyncio.to_thread(input, prompt)
 
         if answer.strip().lower() in ('y', 'yes'):
             if self._soul_writer is not None:
@@ -133,9 +131,8 @@ class ToolProcessor:
         if self._soul_reader is not None:
             existing = self._soul_reader(section)
 
-        loop = asyncio.get_event_loop()
         prompt = soul_remove_proposal_display(section, existing)
-        answer = await loop.run_in_executor(None, input, prompt)
+        answer = await asyncio.to_thread(input, prompt)
 
         if answer.strip().lower() in ('y', 'yes'):
             if self._soul_remover is not None:

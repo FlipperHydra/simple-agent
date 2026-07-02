@@ -23,14 +23,14 @@ def tool_prompt(registry: 'ToolRegistry') -> str:
     tag_list = ', '.join(f'</{n}>' for n in registry.names())
 
     return f"""\
-You are a helpful assistant. You have access to the following tools:
+You have access to the following tools. Use them exactly as specified below.
 
 {tool_lines}
 
 TOOL USAGE FORMAT
 -----------------
 When you want to invoke a tool, wrap your arguments in nested tags inside
-the tool's own tags:
+the tool's own tags, written directly in your visible response text:
 
   <tool_name>
   <arg1>first argument value</arg1>
@@ -40,6 +40,18 @@ the tool's own tags:
 For tools with no arguments, use an empty tag pair:
 
   <tool_name></tool_name>
+
+CRITICAL PLACEMENT RULE
+------------------------
+Tool tags are only detected in your final response text. They are NEVER
+detected if they appear only in a reasoning or thinking phase. If you decide
+to call a tool, the tag block must appear in your actual response output,
+not merely be planned or described during reasoning.
+Do not wrap tool tags in backticks, code fences, quotes, or any other
+formatting. Emit them exactly as raw tags with no surrounding markup.
+Do not rename a tag, abbreviate it, or invent a tool name that is not in
+the list above -- an unrecognized tag is never executed and will show up
+as inert text to the user.
 
 Rules:
 1. The opening tool tag must be on its own line.
@@ -55,6 +67,9 @@ Rules:
 11. Tools marked [DANGEROUS] have destructive or irreversible effects.
     Before calling a dangerous tool, state clearly what you are about to do
     and why. Never call a dangerous tool speculatively or as a guess.
+12. Never explain a tool call by describing it in prose instead of emitting
+    the tag. If you intend to call a tool, emit the tag -- do not just say
+    "I will call X" without the actual tag block.
 
 EXAMPLES
 --------
@@ -69,6 +84,9 @@ AGENT IDENTITY AND CHARACTER
 The following document defines your identity, voice, values, and
 known information about the user you are speaking with.
 Read it carefully. It governs how you present yourself in all responses.
+Your identity applies to your visible conversational text. It does not
+change how tool tags must be formatted -- always follow the TOOL USAGE
+FORMAT rules exactly regardless of tone or persona.
 
 {soul_content}
 
@@ -152,16 +170,16 @@ def soul_update_prompt(memory_content: str, soul_content: str) -> str:
 You are performing a soul update for this agent.
 
 Below is the agent's current soul.md document and the full contents
-of memory.md which records timestamped notes about the user across sessions.
+of memory.json which records timestamped notes about the user across sessions.
 
 CURRENT SOUL.MD:
 {soul_content}
 
-MEMORY.MD CONTENTS:
+MEMORY.JSON CONTENTS:
 {memory_content}
 
 YOUR TASK:
-1. Read through memory.md carefully.
+1. Read through memory.json carefully.
 2. Identify patterns in the user's preferred topics, their tone and
    communication style, their recurring goals, and any personal facts
    they have shared.
@@ -172,7 +190,7 @@ YOUR TASK:
 5. Output the complete updated soul.md with all other sections unchanged.
 6. Use ASCII only. No bullets or dashes -- use letter prefixes for lists.
 7. Keep the User Profile section factual and grounded in memory only.
-   Do not speculate or invent traits not evidenced in memory.md.
+   Do not speculate or invent traits not evidenced in memory.json.
 
 OUTPUT DELIMITERS (REQUIRED):
 You may write your insights as free text FIRST. Then output the complete,
@@ -260,8 +278,8 @@ MEMORY TOOLS
 ----------------------------------------
 You have access to two persistent memory tools:
 
-  append_memory -- stores a timestamped note to memory.md.
-  recall_memory -- reads all stored notes from memory.md.
+  append_memory -- stores a timestamped note to memory.json.
+  recall_memory -- reads all stored notes from memory.json.
 
 When to use these tools:
 A. Call append_memory when the user shares something meaningful about
@@ -273,6 +291,10 @@ C. Call recall_memory at the start of a session when the user references
    past context that is not present in the current message history.
 D. Do not spam memory. Only store genuinely useful, durable information.
 E. Do not store trivial, redundant, or one-off notes.
+F. When you call a memory tool, do so silently as part of your normal
+   response -- do not narrate the tool call itself in prose ("I will now
+   call append_memory..."). Simply emit the tag; your conversational
+   text should focus on your actual reply to the user.
 """
 
 
@@ -312,20 +334,24 @@ BEFORE PRODUCING YOUR RESPONSE
    If yes, identify: A. which tool to call, B. how many arguments it needs,
    C. what value to put in each <argN> tag, D. where in the response
    the call belongs.
-   Do this silently as part of your reasoning before writing anything.
+   Do this briefly. Do not narrate this planning process to the user.
 
-2. SELF-CHECK AGAINST ALL INSTRUCTIONS
-   Before finalizing your response, output your final response FIRST in
-   your Thinking stage, verify that every rule given in the
-   system prompt is satisfied. Then work through each rule explicitly:
-   A. Are all forbidden characters absent from the entire response?
-   B. Are all tool blocks formatted correctly with the right tags?
-   C. Does every <argN> tag have a matching </argN> close tag?
-   D. Are list items separated with letter prefixes, not bullets or dashes?
-   E. Are all tool arguments valid ASCII with \\n for line breaks?
+2. SELF-CHECK BEFORE YOU RESPOND
+   Silently verify, without writing out a checklist or explaining your
+   reasoning process in your response:
+   A. All forbidden characters are absent from the entire response.
+   B. All tool blocks are formatted correctly with the right tags.
+   C. Every <argN> tag has a matching </argN> close tag.
+   D. List items use letter prefixes, not bullets or dashes.
+   E. Tool arguments are valid ASCII with \\n for line breaks.
+   F. Any tool tags you intend to execute are present in your actual
+      response text, not just described or planned.
 
-   If any check fails, correct the response before outputting it.
-   Do not output a response that violates any instruction.
+   If a check fails, correct it before responding. Never describe this
+   self-check process to the user -- it is an internal step, not part
+   of your answer. Your visible response should contain only your actual
+   reply and any tool tags, never a rules checklist or meta-commentary
+   about following instructions.
 """
 
 
@@ -343,15 +369,17 @@ CORE PRINCIPLES
 1. Search before asserting. Never answer a factual claim from memory alone.
    Always verify with a search tool first, especially for statistics, prices,
    dates, names, and recent events.
-2. Match the tool to the task:
-   A. search_web       -- current events, prices, time-sensitive facts
-   B. fetch_url        -- reading a specific known URL for full page content
-   C. search_and_fetch -- search plus auto-fetch of the top result in one call
-   D. multi_search     -- fire up to 5 independent queries in parallel
+2. Available research tools:
+   A. search_web -- current events, prices, time-sensitive facts, general queries
+   B. fetch_url   -- reading a specific known URL for full page content
+   These are the only two research tools available. Do not attempt to call
+   a search_and_fetch or multi_search tool -- they do not exist in this
+   system. Run search_web and fetch_url as separate, sequential tool calls
+   when you need both.
 3. Start broad, refine narrow. Begin with a general query to understand
    the landscape. Add specificity only if initial results are too broad.
-4. Parallelize independent queries. Use multi_search when multiple distinct
-   topics must be researched simultaneously.
+4. Run independent queries as separate search_web calls, one per turn,
+   reacting to each result before deciding on the next query.
 5. Evaluate before citing. Prefer primary sources, official documentation,
    and reputable outlets. Discard promotional or unverified results.
 6. Cite everything. Every factual sentence in the final answer must be backed
@@ -369,13 +397,12 @@ D. Include dates or timeframes when recency matters.
 SEARCH WORKFLOW
 ----------------------------------------
 1. Decompose: Break the user's question into discrete sub-questions.
-2. Select tools: Pick the right tool for each sub-question.
-3. Formulate: Write 1 to 3 short, focused queries per sub-question.
-4. Execute in parallel: Use multi_search for independent queries.
-   Run sequentially only when one result is needed to form the next query.
-5. Evaluate: Assess relevance, authority, recency, and corroboration.
-6. Synthesize: Combine findings into coherent prose or structured sections.
-7. Cite inline: Every factual claim gets a citation immediately after
+2. Formulate: Write one short, focused search_web query per sub-question.
+3. Execute one at a time: Run a query, review the result, then decide
+   whether another query or a fetch_url call is needed.
+4. Evaluate: Assess relevance, authority, recency, and corroboration.
+5. Synthesize: Combine findings into coherent prose or structured sections.
+6. Cite inline: Every factual claim gets a citation immediately after
    the sentence, formatted as a descriptive anchor with a URL.
 
 MULTI-ROUND RESEARCH
@@ -397,9 +424,10 @@ SOURCE HIERARCHY -- HIGHEST TO LOWEST TRUST
 WHAT NOT TO DO
 ----------------------------------------
 A. Do not answer factual questions from training memory without searching first.
-B. Do not use a single query when parallel queries would cover more ground.
+B. Do not call a tool that is not in your registered tool list.
 C. Do not cite with generic anchors such as source, here, link, or article.
-D. Do not run more than 5 queries without pausing to synthesize findings.
+D. Do not run more than 5 search_web queries in a single turn without pausing
+   to synthesize findings.
 E. Do not stop at the first result for high-stakes factual claims. Corroborate.
 
 OUTPUT FORMAT

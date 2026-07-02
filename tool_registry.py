@@ -149,6 +149,16 @@ def _make_propose_soul_edit() -> Callable:
     return propose_soul_edit
 
 
+def _make_propose_soul_remove() -> Callable:
+    # propose_soul_remove is intercepted by name in ToolProcessor (it routes to
+    # the interactive removal handler), so this registered func is never invoked
+    # through normal dispatch. It exists so the tool appears in tag_descriptions
+    # and the EXAMPLES block the model sees.
+    async def propose_soul_remove(section: str) -> str:
+        return f'[propose_soul_remove] Proposed removal for section: {section}'
+    return propose_soul_remove
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: Dict[str, ToolMeta] = {}
@@ -159,142 +169,148 @@ class ToolRegistry:
             'write_tool',
             _make_write_tool(),
             arg_names=['text'],
-            description='appends text to output.txt in the current directory',
+            description='appends a line of text to output.txt in the current directory. Use for quick scratch notes, not named or long-term files -- use save_tool or overwrite_file for those.',
         )
         self.register_tool(
             'save_tool',
             _make_save_tool(),
             arg_names=['filename', 'content'],
-            description='appends content to a named file',
+            description='appends content to the end of a named file, creating it if needed. Use to add content without erasing what exists. To replace a file entirely, use overwrite_file.',
         )
         self.register_tool(
             'overwrite_file',
             _make_overwrite_file(),
             arg_names=['filename', 'content'],
-            description='replaces the entire contents of a file with new content',
+            description='replaces the entire contents of a named file with new content, destroying what was there before. Use to fully rewrite a file. To append instead, use save_tool.',
         )
         self.register_tool(
             'get_datetime',
             _make_get_datetime(),
             arg_names=[],
-            description='returns the current date and time as a formatted string',
+            description='returns the current date and time as a formatted string. Use this instead of guessing the date/time -- your training data does not know the actual current moment.',
         )
         self.register_tool(
             'read_file',
             _make_read_file(),
             arg_names=['filename'],
-            description='reads and returns the full contents of a file',
+            description='reads and returns the full contents of a named file as text. Use for text-based files (code, notes, logs, json). Will fail on binary files.',
         )
         self.register_tool(
             'list_files',
             _make_list_files(),
             arg_names=['directory'],
-            description='lists all entries in a directory, defaults to current directory',
+            description="lists all files and subdirectories in a given directory. Pass '.' for the current directory. Use to discover filenames before read_file, copy_file, or delete_file.",
         )
         self.register_tool(
             'fetch_url',
             _make_fetch_url(),
             arg_names=['url'],
-            description='fetches and returns the first 4000 characters of a URL',
+            description='fetches a web page and returns its first 4000 characters. Only http and https URLs work -- other schemes are blocked. Use for a known page; use search_web to find one first.',
         )
         self.register_tool(
             'search_web',
             _make_search_web(),
             arg_names=['query'],
-            description='searches the web via DDGS and returns top 5 results',
+            description='searches the web for a short query and returns the top 5 results with titles, snippets, and URLs. Use for current events, prices, or uncertain facts. Follow up with fetch_url for full content.',
         )
         self.register_tool(
             'delete_file',
             _make_delete_file(),
             arg_names=['filename'],
-            description='permanently deletes a file from disk [DANGEROUS]',
+            description='permanently and irreversibly deletes a named file from disk. No undo. [DANGEROUS] -- always state which file you are deleting and why before calling this.',
             dangerous=True,
         )
         self.register_tool(
             'make_directory',
             _make_make_directory(),
             arg_names=['path'],
-            description='creates a directory and any missing parent directories',
+            description='creates a directory at the given path, including any missing parent directories, like mkdir -p. Safe to call even if the directory already exists.',
         )
         self.register_tool(
             'copy_file',
             _make_copy_file(),
             arg_names=['src', 'dest'],
-            description='copies a file from src to dest, leaving the original intact',
+            description='copies a file from src to dest, leaving the original at src unchanged. If dest already exists, it will be overwritten.',
         )
         self.register_tool(
             'move_file',
             _make_move_file(),
             arg_names=['src', 'dest'],
-            description='moves or renames a file from src to dest [DANGEROUS]',
+            description='moves or renames a file from src to dest. It no longer exists at src, and dest is overwritten if present. [DANGEROUS] -- state your intent before calling this.',
             dangerous=True,
         )
         self.register_tool(
             'append_memory',
             _make_append_memory(),
             arg_names=['note'],
-            description='appends a timestamped note to memory.json log for persistent recall',
+            description='appends a timestamped note to persistent memory (memory.json) for recall in future sessions. Use only for durable information. Call silently -- do not narrate unless asked.',
         )
         self.register_tool(
             'recall_memory',
             _make_recall_memory(),
             arg_names=[],
-            description='reads and returns all facts and log entries from memory.json',
+            description='reads all previously stored notes from persistent memory (memory.json), including facts from past sessions. Call when the user references something from a prior conversation.',
         )
         self.register_tool(
             'clear_memory',
             _make_clear_memory(),
             arg_names=[],
-            description='wipes all entries from memory.json [DANGEROUS]',
+            description='permanently erases every note in memory.json. Cannot be undone; you will forget the user\'s history. [DANGEROUS] -- only call on an explicit, unambiguous user request.',
             dangerous=True,
         )
         self.register_tool(
             'write_json',
             _make_write_json(),
             arg_names=['filename', 'key', 'value'],
-            description='upserts a key-value pair into a JSON file',
+            description='sets a key to a value in a named JSON file, creating the file or key if missing, or updating it if present. Use for structured data updated by key, not full rewrites.',
         )
         self.register_tool(
             'read_json',
             _make_read_json(),
             arg_names=['filename', 'key'],
-            description='reads a key from a JSON file, or returns the full file if key is omitted',
+            description="reads a value from a named JSON file. Pass a key to get just that value, or leave the key argument empty to get the entire file's contents.",
         )
         self.register_tool(
             'eval_math',
             _make_eval_math(),
             arg_names=['expression'],
-            description='safely evaluates a math expression using AST whitelist (no arbitrary code)',
+            description='safely calculates a math expression (add, subtract, multiply, divide, exponent, parentheses). No arbitrary code. Very large exponents are refused as unsafe -- use smaller numbers.',
         )
         self.register_tool(
             'summarize_file',
             _make_summarize_file(),
             arg_names=['filename'],
-            description='init: reads file, calculates chunks, returns dispatch instructions for iterative summarization',
+            description='starts summarizing a large file too big to read at once. Returns instructions to call summarize_file_chunk repeatedly, then summarize_file_finalize. Use instead of read_file for long files.',
         )
         self.register_tool(
             'summarize_file_chunk',
             _make_summarize_file_chunk(),
             arg_names=['filename', 'chunk_index', 'chunk_summary'],
-            description='per-chunk step: stores agent summary and anchor notes for one chunk; returns next chunk content',
+            description='records your summary of one chunk of a file started by summarize_file, and returns the next chunk. Call once per chunk in order, then call summarize_file_finalize.',
         )
         self.register_tool(
             'summarize_file_finalize',
             _make_summarize_file_finalize(),
             arg_names=['filename'],
-            description='final step: synthesizes all chunk summaries and anchor notes into a complete file summary',
+            description='combines all chunk summaries from summarize_file_chunk into one final summary of the file. Call only after every chunk has been processed.',
         )
         self.register_tool(
             'zip_files',
             _make_zip_files(),
             arg_names=['filenames_csv', 'output_zip'],
-            description='compresses a comma-separated list of files into a zip archive',
+            description="compresses one or more files into a single zip archive. Pass filenames as a comma-separated list (e.g. 'a.txt,b.txt') and an output name ending in .zip.",
         )
         self.register_tool(
             'propose_soul_edit',
             _make_propose_soul_edit(),
             arg_names=['section', 'proposed_content'],
-            description='proposes an update to a soul.md section for user approval',
+            description='proposes a change to a section of your identity document (soul.md) for user approval. Does not take effect until approved. See identity instructions for when to use this.',
+        )
+        self.register_tool(
+            'propose_soul_remove',
+            _make_propose_soul_remove(),
+            arg_names=['section'],
+            description='removes an entire section from your identity document (soul.md), pending user approval. Does not take effect until approved. Only call on an explicit request to delete a section.',
         )
 
     def register_tool(

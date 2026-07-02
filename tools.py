@@ -121,7 +121,7 @@ class Tools:
             text
             .replace('\\n', '\n')
             .replace('\\t', '\t')
-            .replace("\\'", "'")
+            .replace("\\", "'")
         )
         with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
             f.write(formatted + '\n')
